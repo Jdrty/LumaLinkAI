@@ -9,3 +9,16 @@
 # Non Functional/Needs fixing
 - There is an animation feature but they are very buggy and must be improved
 - Animations flash to blank before resuming every frame for an unknown reason
+# To Run Files
+- You will need your own API key stored in a ".env" file in the project directory with this format:
+  GLHF_API_KEY=*YOUR_API_KEY_HERE*
+- Heres a good place to get yours for no cost: https://glhf.chat/users/settings/api
+- Ensure you have all libraries downloaded:
+  pip install openai
+  pip install pyserial
+  pip install glob2
+- If your using python 3.7 put pip3 instead of pip!
+# Future Planning
+- Will likely change to a 16x16 matrix
+- Change shift registers for better design and functionality, likely use MAX7219 chip
+- Make the frontend more visually appealing
