@@ -11,1062 +11,866 @@ from tkinter import font as tkfont
 from dotenv import load_dotenv
 import threading
 import json
+import queue
+import logging
 
-# Constants for LED Matrix
-LED_SIZE = 30  # Diameter of each LED
-LED_PADDING = 5  # Padding between LEDs
-ON_COLOR = "#FF0000"  # Red color for ON state
-OFF_COLOR = "#330000"  # Dark red for OFF state
-ANIMATION_DELAY = 500  # Milliseconds between animation frames
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s: %(message)s',
+    handlers=[
+        logging.FileHandler('led_matrix_app.log'),
+        logging.StreamHandler()
+    ]
+)
 
-# Load API Key from .env
+# LED Matrix Constants
+LED_DIAMETER = 30
+LED_SPACING = 5
+ACTIVE_COLOR = "#FF0000"
+INACTIVE_COLOR = "#330000"
+FRAME_DELAY_MS = 500
+MAX_ANIMATION_FRAMES = 10
+
+# Load environment variables
 load_dotenv()
 
-# Function to find Arduino serial port
 def find_arduino_port():
-    # Modify this pattern based on your OS and Arduino connection
     patterns = ['/dev/cu.usbserial*', '/dev/ttyUSB*', '/dev/ttyACM*', 'COM3', 'COM4']
     ports = []
     for pattern in patterns:
-        ports.extend(glob.glob(pattern))
+        ports += glob.glob(pattern)
     if not ports:
-        raise SerialException("No Arduino serial ports found. Please check the connection.")
+        raise SerialException("No Arduino serial ports found. Check connection.")
     if len(ports) > 1:
-        raise SerialException("Multiple serial ports found. Please specify the correct one.")
+        raise SerialException("Multiple serial ports found. Specify the correct one.")
     return ports[0]
 
-# Custom Exception for serial errors
 class SerialException(Exception):
     pass
 
-# Import MockSerial if USE_MOCK_SERIAL is set, else use serial.Serial
-USE_MOCK_SERIAL = os.getenv('USE_MOCK_SERIAL', 'false').lower() in ['true', '1', 'yes']
+USE_MOCK = os.getenv('USE_MOCK_SERIAL', 'false').lower() in ['true', '1', 'yes']
 
-if USE_MOCK_SERIAL:
+if USE_MOCK:
     try:
-        from mock_serial import MockSerial as SerialClass
-        print("Using MockSerial for testing.")
+        from mock_serial import MockSerial as SerialPort
+        logging.info("MockSerial enabled for testing.")
     except ImportError:
-        print("mock_serial module not found. Please ensure it's available for testing.")
+        logging.error("MockSerial module missing.")
         sys.exit(1)
 else:
-    try:
-        SerialClass = serial.Serial
-    except ImportError:
-        print("pyserial is not installed.")
-        sys.exit(1)
+    SerialPort = serial.Serial
 
-# Initialize Serial Communication
-def initialize_serial():
-    if USE_MOCK_SERIAL:
-        ser = SerialClass(port='COM3', baudrate=9600, timeout=1)  # Port name is arbitrary for mock
+def initialize_serial_connection():
+    if USE_MOCK:
+        ser = SerialPort(port='COM3', baudrate=9600, timeout=1)
     else:
         arduino_port = find_arduino_port()
-        print(f"Connecting to Arduino on port: {arduino_port}")
+        logging.info(f"Connecting to Arduino on {arduino_port}")
         try:
-            ser = SerialClass(port=arduino_port, baudrate=9600, timeout=1)
+            ser = SerialPort(port=arduino_port, baudrate=9600, timeout=1)
         except serial.SerialException as e:
-            raise SerialException(f"Failed to connect to {arduino_port}: {e}")
-        time.sleep(2)  # Wait for the serial connection to initialize
+            raise SerialException(f"Connection failed: {e}")
+        time.sleep(2)
+    logging.info("Serial connection established.")
     return ser
 
-# API key setup
 api_key = os.getenv('GLHF_API_KEY')
 if not api_key:
-    print("Error: GLHF_API_KEY not found in environment variables.")
+    logging.error("GLHF_API_KEY not set.")
     sys.exit(1)
 
 openai.api_key = api_key
 openai.api_base = 'https://glhf.chat/api/openai/v1'
 
-# Function to sanitize filenames
-def sanitize_filename(filename):
-    return re.sub(r'[\\/*?:"<>|]',"", filename)
+def clean_filename(name):
+    return re.sub(r'[\\/*?:"<>|]',"", name)
 
-# Function to generate patterns from AI
-def generate_patterns_from_ai(prompt, animation=False, num_frames=5, log_callback=None):
-    max_attempts = 3
-    attempt = 0
-    patterns = []
-    while attempt < max_attempts:
+def generate_patterns(prompt, animation=False, frame_count=5, logger=None):
+    attempts, patterns = 0, []
+    while attempts < 3:
         try:
             if not animation:
-                # Single frame
                 response = openai.ChatCompletion.create(
                     model='hf:meta-llama/Meta-Llama-3.1-405B-Instruct',
                     messages=[
                         {"role": "system", "content": "You are a helpful assistant."},
-                        {"role": "user", "content": (
-                            "Generate exactly 8 integers between 0 and 255 (inclusive), "
-                            "each representing a row of an 8x8 LED matrix pattern for '{}'. "
-                            "Provide only the list of 8 integers separated by commas on a single line, "
-                            "with no additional text, explanations, or characters."
-                        ).format(prompt)}
+                        {"role": "user", "content": f"Generate exactly 8 integers between 0 and 255 for '{prompt}'. Provide only the list separated by commas."}
                     ]
                 )
-                pattern_text = response.choices[0].message.content.strip()
-                if log_callback:
-                    log_callback(f"Raw AI Response (Attempt {attempt + 1}): {pattern_text}")
-
-                # Process pattern
-                pattern_text = re.sub(r'[\[\]]', '', pattern_text)
-                numbers = re.split(r'[,\s]+', pattern_text)
-                numbers = [num for num in numbers if num.isdigit()]
-                if len(numbers) >= 8:
-                    pattern = [int(num) for num in numbers[:8]]
-                    if all(0 <= num <= 255 for num in pattern):
-                        return pattern
-                    else:
-                        if log_callback:
-                            log_callback(f"Attempt {attempt + 1}: Pattern values out of range. Retrying...")
-                else:
-                    if log_callback:
-                        log_callback(f"Attempt {attempt + 1}: Invalid pattern received. Retrying...")
+                raw = response.choices[0].message.content.strip()
+                if logger:
+                    logger(f"AI Response: {raw}")
+                raw = re.sub(r'[\[\]]', '', raw)
+                nums = [int(n) for n in re.split(r'[,\s]+', raw) if n.isdigit()]
+                if len(nums) >= 8 and all(0 <= n <= 255 for n in nums):
+                    return nums[:8]
+                if logger:
+                    logger(f"Attempt {attempts + 1}: Invalid pattern. Retrying...")
             else:
-                # Animation: Generate multiple frames
-                for frame_num in range(num_frames):
-                    response = openai.ChatCompletion.create(
+                temp_patterns = []
+                for i in range(frame_count):
+                    resp = openai.ChatCompletion.create(
                         model='hf:meta-llama/Meta-Llama-3.1-405B-Instruct',
                         messages=[
                             {"role": "system", "content": "You are a helpful assistant."},
-                            {"role": "user", "content": (
-                                "Generate exactly 8 integers between 0 and 255 (inclusive), "
-                                "each representing a row of an 8x8 LED matrix pattern for frame {} of an animation about '{}'. "
-                                "Provide only the list of 8 integers separated by commas on a single line, "
-                                "with no additional text, explanations, or characters."
-                            ).format(frame_num + 1, prompt)}
+                            {"role": "user", "content": f"Generate exactly 8 integers between 0 and 255 for frame {i+1} of '{prompt}'. Provide only the list separated by commas."}
                         ]
                     )
-                    pattern_text = response.choices[0].message.content.strip()
-                    if log_callback:
-                        log_callback(f"Raw AI Response for Frame {frame_num + 1} (Attempt {attempt + 1}): {pattern_text}")
-
-                    # Process pattern
-                    pattern_text = re.sub(r'[\[\]]', '', pattern_text)
-                    numbers = re.split(r'[,\s]+', pattern_text)
-                    numbers = [num for num in numbers if num.isdigit()]
-                    if len(numbers) >= 8:
-                        pattern = [int(num) for num in numbers[:8]]
-                        if all(0 <= num <= 255 for num in pattern):
-                            patterns.append(pattern)
-                        else:
-                            if log_callback:
-                                log_callback(f"Attempt {attempt + 1}: Pattern values out of range in frame {frame_num + 1}. Retrying...")
-                            patterns = []
-                            break
+                    raw_frame = resp.choices[0].message.content.strip()
+                    if logger:
+                        logger(f"AI Response Frame {i+1}: {raw_frame}")
+                    raw_frame = re.sub(r'[\[\]]', '', raw_frame)
+                    nums_frame = [int(n) for n in re.split(r'[,\s]+', raw_frame) if n.isdigit()]
+                    if len(nums_frame) >= 8 and all(0 <= n <= 255 for n in nums_frame):
+                        temp_patterns.append(nums_frame[:8])
                     else:
-                        if log_callback:
-                            log_callback(f"Attempt {attempt + 1}: Invalid pattern received in frame {frame_num + 1}. Retrying...")
-                        patterns = []
+                        if logger:
+                            logger(f"Attempt {attempts + 1}: Invalid frame {i+1}. Retrying animation...")
+                        temp_patterns = []
                         break
-                if patterns:
-                    return patterns
+                if temp_patterns:
+                    return temp_patterns
         except openai.error.OpenAIError as e:
-            if log_callback:
-                log_callback(f"OpenAI API error: {e}")
+            if logger:
+                logger(f"OpenAI Error: {e}")
             return None
-
-        attempt += 1
-    if log_callback:
-        log_callback("Error: Failed to generate valid pattern(s) after multiple attempts.")
+        attempts += 1
+    if logger:
+        logger("Failed to generate patterns after multiple attempts.")
     return None
 
-# Function to send single pattern
-def send_single_pattern(ser, pattern, log_callback=None, preview_callback=None):
+def send_single_frame(ser, pattern, logger=None, update_preview=None):
     if len(pattern) != 8:
-        if log_callback:
-            log_callback("Error: Pattern must have 8 integers.")
+        if logger:
+            logger("Pattern must have 8 integers.")
         return
     try:
-        ser.write(bytes([0xFF]))  # Start marker for single frame
+        ser.write(bytes([0xFF]))
         ser.flush()
         for byte in pattern:
             ser.write(bytes([byte]))
-        ser.write(bytes([0xFE]))  # End marker for single frame
+        ser.write(bytes([0xFE]))
         ser.flush()
         time.sleep(0.1)
-        # Wait for acknowledgment
-        ack_received = False
-        start_time = time.time()
-        while not ack_received and (time.time() - start_time) < 5:  # Timeout after 5 seconds
+        start = time.time()
+        ack = False
+        while not ack and (time.time() - start) < 5:
             if ser.in_waiting:
-                ack = ser.readline().decode().strip()
-                if log_callback:
-                    log_callback(f"Acknowledgment from serial: {ack}")
-                if ack == "Pattern received.":
-                    ack_received = True
-        if not ack_received:
-            if log_callback:
-                log_callback("No acknowledgment received for single pattern.")
-        # Update preview
-        if preview_callback:
-            preview_callback(pattern, animation=False)
+                response = ser.readline().decode().strip()
+                if logger:
+                    logger(f"Serial Ack: {response}")
+                if response == "Pattern received.":
+                    ack = True
+        if not ack and logger:
+            logger("No acknowledgment for single pattern.")
+        if update_preview:
+            update_preview(pattern, animation=False)
     except serial.SerialException as e:
-        if log_callback:
-            log_callback(f"Serial communication error: {e}")
+        if logger:
+            logger(f"Serial Error: {e}")
 
-# Function to send animation
-def send_animation(ser, patterns, log_callback=None, preview_callback=None):
-    num_frames = len(patterns)
-    if num_frames == 0:
-        if log_callback:
-            log_callback("Error: No frames to send.")
+class AnimationManager:
+    def __init__(self, canvas, update_func):
+        self.canvas = canvas
+        self.update_leds = update_func
+        self.queue = queue.Queue()
+        self.playing = False
+        self.stop_flag = threading.Event()
+
+    def start(self, frames):
+        if self.playing:
+            self.stop()
+        for frame in frames:
+            self.queue.put(frame)
+        self.playing = True
+        self.stop_flag.clear()
+        threading.Thread(target=self._play, daemon=True).start()
+
+    def _play(self):
+        try:
+            while not self.stop_flag.is_set() and not self.queue.empty():
+                frame = self.queue.get()
+                self.canvas.after(0, lambda f=frame: self._update_frame(f))
+                time.sleep(FRAME_DELAY_MS / 1000)
+        except Exception as e:
+            logging.error(f"Animation error: {e}")
+        finally:
+            self.playing = False
+            self.stop_flag.clear()
+
+    def _update_frame(self, frame):
+        self.update_leds(frame, animation=True)
+
+    def stop(self):
+        if self.playing:
+            self.stop_flag.set()
+            logging.info("Animation stopped.")
+
+def send_animation(ser, frames, logger=None, animator=None):
+    count = len(frames)
+    if count == 0:
+        if logger:
+            logger("No frames to send.")
         return
-    if num_frames > 10:
-        if log_callback:
-            log_callback(f"Error: Number of frames ({num_frames}) exceeds MAX_FRAMES (10).")
+    if count > MAX_ANIMATION_FRAMES:
+        if logger:
+            logger(f"Frames exceed maximum of {MAX_ANIMATION_FRAMES}.")
         return
     try:
-        ser.write(bytes([0xFA]))  # Start marker for animation
+        ser.write(bytes([0xFA]))
         ser.flush()
-        ser.write(bytes([num_frames]))  # Number of frames
+        ser.write(bytes([count]))
         ser.flush()
-        for pattern in patterns:
-            for byte in pattern:
+        for frame in frames:
+            for byte in frame:
                 ser.write(bytes([byte]))
-        ser.write(bytes([0xFB]))  # End marker for animation
+        ser.write(bytes([0xFB]))
         ser.flush()
         time.sleep(0.1)
-        # Wait for acknowledgment
-        ack_received = False
-        start_time = time.time()
-        while not ack_received and (time.time() - start_time) < 5:  # Timeout after 5 seconds
+        start = time.time()
+        ack = False
+        while not ack and (time.time() - start) < 5:
             if ser.in_waiting:
-                ack = ser.readline().decode().strip()
-                if log_callback:
-                    log_callback(f"Acknowledgment from serial: {ack}")
-                if ack in ["Animation received.", "Invalid end marker received."]:
-                    ack_received = True
-        if not ack_received:
-            if log_callback:
-                log_callback("No acknowledgment received for animation.")
-        # Play animation in preview
-        if preview_callback:
-            threading.Thread(target=play_animation_preview, args=(patterns, preview_callback), daemon=True).start()
+                response = ser.readline().decode().strip()
+                if logger:
+                    logger(f"Serial Ack: {response}")
+                if response in ["Animation received.", "Invalid end marker received."]:
+                    ack = True
+        if not ack and logger:
+            logger("No acknowledgment for animation.")
+        if animator:
+            animator.start(frames)
     except serial.SerialException as e:
-        if log_callback:
-            log_callback(f"Serial communication error: {e}")
+        if logger:
+            logger(f"Serial Error: {e}")
 
-# Function to play animation in preview
-def play_animation_preview(patterns, preview_callback):
-    for pattern in patterns:
-        preview_callback(pattern, animation=True)
-        time.sleep(ANIMATION_DELAY / 1000)  # Convert ms to seconds
-
-# Function to save a single pattern
-def save_pattern(pattern, name=None, overwrite=False):
-    # Define the directory to save patterns and animations
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    save_dir = os.path.join(script_dir, "saved_patterns")
-    os.makedirs(save_dir, exist_ok=True)  # Create the directory if it doesn't exist
-
+def save_single_pattern(pattern, name=None, overwrite=False):
+    dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_patterns")
+    os.makedirs(dir_path, exist_ok=True)
     if not name:
-        # Generate a default name based on timestamp
         name = f"pattern_{int(time.time())}.json"
     else:
-        # Sanitize filename and append .json
-        name = sanitize_filename(name) + '.json'
-
-    file_path = os.path.join(save_dir, name)
-
-    # Check if file exists
-    if os.path.exists(file_path) and not overwrite:
-        # Prompt user to replace or cancel
+        name = clean_filename(name) + '.json'
+    path = os.path.join(dir_path, name)
+    if os.path.exists(path) and not overwrite:
         root = tk.Tk()
-        root.withdraw()  # Hide the root window
-        replace = messagebox.askyesno("File Exists", f"The file '{name}' already exists. Do you want to replace it?")
+        root.withdraw()
+        replace = messagebox.askyesno("File Exists", f"'{name}' exists. Replace?")
         root.destroy()
         if not replace:
-            return None  # Cancel saving
-
-    data = {
-        'type': 'single',
-        'pattern': pattern
-    }
+            return None
+    data = {'type': 'single', 'pattern': pattern}
     try:
-        with open(file_path, 'w') as f:
+        with open(path, 'w') as f:
             json.dump(data, f, indent=4)
-        return file_path
-    except Exception as e:
+        return path
+    except:
         return None
 
-# Function to save an animation
-def save_animation(patterns, name=None, overwrite=False):
-    # Define the directory to save patterns and animations
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    save_dir = os.path.join(script_dir, "saved_patterns")
-    os.makedirs(save_dir, exist_ok=True)  # Create the directory if it doesn't exist
-
+def save_animation_frames(frames, name=None, overwrite=False):
+    dir_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_patterns")
+    os.makedirs(dir_path, exist_ok=True)
     if not name:
-        # Generate a default name based on timestamp
         name = f"animation_{int(time.time())}.json"
     else:
-        # Sanitize filename and append .json
-        name = sanitize_filename(name) + '.json'
-
-    file_path = os.path.join(save_dir, name)
-
-    # Check if file exists
-    if os.path.exists(file_path) and not overwrite:
-        # Prompt user to replace or cancel
+        name = clean_filename(name) + '.json'
+    path = os.path.join(dir_path, name)
+    if os.path.exists(path) and not overwrite:
         root = tk.Tk()
-        root.withdraw()  # Hide the root window
-        replace = messagebox.askyesno("File Exists", f"The file '{name}' already exists. Do you want to replace it?")
+        root.withdraw()
+        replace = messagebox.askyesno("File Exists", f"'{name}' exists. Replace?")
         root.destroy()
         if not replace:
-            return None  # Cancel saving
-
-    data = {
-        'type': 'animation',
-        'patterns': patterns
-    }
+            return None
+    data = {'type': 'animation', 'patterns': frames}
     try:
-        with open(file_path, 'w') as f:
+        with open(path, 'w') as f:
             json.dump(data, f, indent=4)
-        return file_path
-    except Exception as e:
+        return path
+    except:
         return None
 
-# Function to load a saved pattern or animation
-def load_saved_file(file_path):
+def load_saved(file_path):
     with open(file_path, 'r') as f:
-        data = json.load(f)
-    return data
+        return json.load(f)
 
-# GUI Application Class
 class LEDMatrixApp:
     def __init__(self, master):
         self.master = master
         master.title("LED Matrix Controller")
         master.geometry("1300x1000")
-        master.resizable(True, True)
+        master.configure(bg="#121212")
 
-        # Define color scheme
-        self.bg_color = "#121212"        # Dark background
-        self.accent_color = "#bb86fc"    # Vibrant accent
-        self.text_color = "#ffffff"      # White text
-        self.button_color = "#1f1f1f"    # Button background
-        self.entry_bg = "#1f1f1f"        # Entry background
-        self.entry_fg = "#ffffff"        # Entry text
-        self.error_color = "#cf6679"     # Error messages
-        self.success_color = "#03dac6"   # Success messages
+        # Fonts
+        self.title_font = tkfont.Font(family="Helvetica", size=16, weight="bold")
+        self.label_font = tkfont.Font(family="Helvetica", size=12)
+        self.button_font = tkfont.Font(family="Helvetica", size=12, weight="bold")
+        self.log_font = tkfont.Font(family="Helvetica", size=10)
 
-        master.configure(bg=self.bg_color)
+        self.create_ui()
 
-        # Define fonts
-        self.font_title = tkfont.Font(family="Helvetica", size=16, weight="bold")
-        self.font_labels = tkfont.Font(family="Helvetica", size=12)
-        self.font_buttons = tkfont.Font(family="Helvetica", size=12, weight="bold")
-        self.font_log = tkfont.Font(family="Helvetica", size=10)
-
-        # Create GUI Components first
-        self.create_widgets()
-
-        # Initialize Serial
         try:
-            self.ser = initialize_serial()
-            self.log("Serial connection established.", "info")
+            self.serial_conn = initialize_serial_connection()
+            self.log("Serial connected.", "info")
         except SerialException as e:
-            messagebox.showerror("Serial Connection Error", str(e))
+            messagebox.showerror("Serial Error", str(e))
             self.log(str(e), "error")
             sys.exit(1)
 
-        # Initialize LED Matrix Preview
-        self.create_led_matrix_preview()
+        self.create_led_preview()
+        self.anim_manager = AnimationManager(self.canvas, self.update_leds)
 
-        # Initialize current file path
-        self.current_file_path = None
+        self.current_file = None
 
-    def create_widgets(self):
-        # Main Frame
-        main_frame = ttk.Frame(self.master, padding="20 20 20 20")
-        main_frame.grid(row=0, column=0, sticky='NSEW')
-
-        # Configure grid weights for responsiveness
+    def create_ui(self):
+        frame = ttk.Frame(self.master, padding="20 20 20 20")
+        frame.grid(row=0, column=0, sticky='NSEW')
         self.master.columnconfigure(0, weight=1)
         self.master.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.columnconfigure(1, weight=3)
+        frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(1, weight=3)
 
-        # Style configuration
         style = ttk.Style()
-        style.theme_use('clam')  # Use 'clam' theme as a base
-
-        # Custom styles
-        style.configure("TLabel", background=self.bg_color, foreground=self.text_color, font=self.font_labels)
+        style.theme_use('clam')
+        style.configure("TLabel", background="#121212", foreground="#ffffff", font=self.label_font)
         style.configure("TButton",
-                        background=self.button_color,
-                        foreground=self.text_color,
-                        font=self.font_buttons,
+                        background="#1f1f1f",
+                        foreground="#ffffff",
+                        font=self.button_font,
                         borderwidth=0,
                         focuscolor='none')
         style.map("TButton",
-                  background=[('active', self.accent_color)],
-                  foreground=[('active', self.text_color)])
+                  background=[('active', "#bb86fc")],
+                  foreground=[('active', "#ffffff")])
         style.configure("TEntry",
-                        fieldbackground=self.entry_bg,
-                        foreground=self.entry_fg,
-                        font=self.font_labels,
-                        borderwidth=2,
-                        relief="groove")
-        style.configure("TScrolledText",
-                        background=self.entry_bg,
-                        foreground=self.text_color,
-                        font=self.font_log,
+                        fieldbackground="#1f1f1f",
+                        foreground="#ffffff",
+                        font=self.label_font,
                         borderwidth=2,
                         relief="groove")
 
-        # Description Label and Entry with increased margin
-        desc_label = ttk.Label(main_frame, text="Pattern Description:")
+        # Description Entry
+        desc_label = ttk.Label(frame, text="Pattern Description:")
         desc_label.grid(row=0, column=0, padx=(0, 10), pady=(0, 5), sticky='w')
 
-        self.desc_entry = ttk.Entry(main_frame, width=60)
+        self.desc_entry = ttk.Entry(frame, width=60)
         self.desc_entry.grid(row=0, column=1, padx=(0, 0), pady=(0, 5), sticky='w')
         self.desc_entry.focus()
 
-        # Add border and shadow to entry (simulated with padding and background)
-        self.desc_entry.configure(style="TEntry")
+        # Buttons
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=1, column=0, columnspan=2, pady=(10, 10), sticky='w')
 
-        # Button Frame with proper spacing and grouping
-        button_frame = ttk.Frame(main_frame)
-        button_frame.grid(row=1, column=0, columnspan=2, pady=(10, 10), sticky='w')
+        self.gen_single_btn = ttk.Button(btn_frame, text="Generate Single Pattern", command=self.gen_single)
+        self.gen_single_btn.grid(row=0, column=0, padx=(0, 20), pady=5, sticky='w')
+        self.gen_single_btn.configure(state='disabled')
 
-        # Generate Single Pattern Button
-        self.single_btn = ttk.Button(button_frame, text="Generate Single Pattern", command=self.generate_single_pattern)
-        self.single_btn.grid(row=0, column=0, padx=(0, 20), pady=5, sticky='w')
-        self.single_btn.configure(state='disabled')  # Initially disabled
+        self.gen_anim_btn = ttk.Button(btn_frame, text="Generate Animation", command=self.gen_animation)
+        self.gen_anim_btn.grid(row=0, column=1, padx=(0, 20), pady=5, sticky='w')
+        self.gen_anim_btn.configure(state='disabled')
 
-        # Generate Animation Button
-        self.animate_btn = ttk.Button(button_frame, text="Generate Animation", command=self.generate_animation)
-        self.animate_btn.grid(row=0, column=1, padx=(0, 20), pady=5, sticky='w')
-        self.animate_btn.configure(state='disabled')  # Initially disabled
-
-        # Load Button (for both patterns and animations)
-        self.load_btn = ttk.Button(button_frame, text="Load Pattern/Animation", command=self.load_ui)
+        self.load_btn = ttk.Button(btn_frame, text="Load Pattern/Animation", command=self.load_ui)
         self.load_btn.grid(row=0, column=2, padx=(0, 20), pady=5, sticky='w')
-        self.load_btn.configure(state='disabled')  # Initially disabled
+        self.load_btn.configure(state='disabled')
 
-        # Edit Button
-        self.edit_btn = ttk.Button(button_frame, text="Edit", command=self.edit_current, state='disabled')
+        self.edit_btn = ttk.Button(btn_frame, text="Edit", command=self.edit_current, state='disabled')
         self.edit_btn.grid(row=0, column=3, padx=(0, 20), pady=5, sticky='w')
 
-        # Publish Button
-        self.publish_btn = ttk.Button(button_frame, text="Publish", command=self.publish_current, state='disabled')
+        self.publish_btn = ttk.Button(btn_frame, text="Publish", command=self.publish_current, state='disabled')
         self.publish_btn.grid(row=0, column=4, padx=(0, 20), pady=5, sticky='w')
 
-        # Exit Button grouped separately
-        exit_btn = ttk.Button(button_frame, text="Exit", command=self.exit_application)
+        exit_btn = ttk.Button(btn_frame, text="Exit", command=self.exit_app)
         exit_btn.grid(row=0, column=5, padx=(100, 0), pady=5, sticky='e')
 
-        # Add tooltips
-        self.create_tooltip(self.single_btn, "Generate and send a single LED pattern based on the description.")
-        self.create_tooltip(self.animate_btn, "Generate and send an animation with multiple LED patterns based on the description.")
-        self.create_tooltip(self.load_btn, "Load a saved pattern or animation to display on the LED matrix.")
-        self.create_tooltip(self.edit_btn, "Edit the current pattern or animation.")
-        self.create_tooltip(self.publish_btn, "Publish the edited pattern or animation to the Arduino.")
-        self.create_tooltip(exit_btn, "Close the application.")
+        # Tooltips
+        self.add_tooltips()
 
-        # Bind keyboard shortcuts
-        self.master.bind('<Control-g>', lambda event: self.generate_single_pattern())
-        self.master.bind('<Control-a>', lambda event: self.generate_animation())
-        self.master.bind('<Control-l>', lambda event: self.load_ui())
-        self.master.bind('<Control-e>', lambda event: self.exit_application())
+        # Keyboard Shortcuts
+        self.master.bind('<Control-g>', lambda e: self.gen_single())
+        self.master.bind('<Control-a>', lambda e: self.gen_animation())
+        self.master.bind('<Control-l>', lambda e: self.load_ui())
+        self.master.bind('<Control-e>', lambda e: self.exit_app())
 
-        # Log Label
-        log_label = ttk.Label(main_frame, text="Logs:")
+        # Log Area
+        log_label = ttk.Label(frame, text="Logs:")
         log_label.grid(row=2, column=0, padx=(0, 10), pady=(10, 5), sticky='w')
 
-        # Log Text Area with scrollbar
-        self.log_area = scrolledtext.ScrolledText(main_frame, width=80, height=25, state='disabled', wrap='word')
+        self.log_area = scrolledtext.ScrolledText(frame, width=80, height=25, state='disabled', wrap='word')
         self.log_area.grid(row=3, column=0, columnspan=2, padx=(0, 0), pady=(0, 10), sticky='nsew')
+        frame.rowconfigure(3, weight=1)
+        frame.columnconfigure(1, weight=1)
 
-        # Configure grid to make log_area expand
-        main_frame.rowconfigure(3, weight=1)
-        main_frame.columnconfigure(1, weight=1)
+        # Input Validation
+        self.desc_entry.bind('<KeyRelease>', self.toggle_buttons)
 
-        # Bind event to enable/disable buttons based on input
-        self.desc_entry.bind('<KeyRelease>', self.check_input)
-
-        # Initialize variables to store the last generated patterns
+        # Store patterns
         self.current_pattern = None
         self.current_animation = None
         self.is_animation = False
-        self.current_file_path = None  # To track the currently loaded file
 
-    def create_led_matrix_preview(self):
-        """
-        Creates an 8x8 LED matrix preview using Canvas.
-        """
+    def add_tooltips(self):
+        Tooltip(self.gen_single_btn, "Generate and send a single LED pattern based on the description.")
+        Tooltip(self.gen_anim_btn, "Generate and send an animation with multiple LED patterns based on the description.")
+        Tooltip(self.load_btn, "Load a saved pattern or animation to display on the LED matrix.")
+        Tooltip(self.edit_btn, "Edit the current pattern or animation.")
+        Tooltip(self.publish_btn, "Publish the edited pattern or animation to the Arduino.")
+        Tooltip(self.master, "Close the application.")
+
+    def create_led_preview(self):
         preview_frame = ttk.LabelFrame(self.master, text="LED Matrix Preview", padding="10 10 10 10")
         preview_frame.grid(row=4, column=0, columnspan=2, pady=(10, 0), sticky='n')
 
-        self.canvas = tk.Canvas(preview_frame, width=LED_SIZE * 8 + LED_PADDING * 9,
-                                height=LED_SIZE * 8 + LED_PADDING * 9, bg="#000000")
+        self.canvas = tk.Canvas(preview_frame, width=LED_DIAMETER * 8 + LED_SPACING * 9,
+                                height=LED_DIAMETER * 8 + LED_SPACING * 9, bg="#000000")
         self.canvas.pack()
 
-        # Initialize LED circles and store their references
-        self.led_circles = []
+        self.leds = []
         for row in range(8):
-            row_circles = []
+            row_leds = []
             for col in range(8):
-                x1 = LED_PADDING + col * (LED_SIZE + LED_PADDING)
-                y1 = LED_PADDING + row * (LED_SIZE + LED_PADDING)
-                x2 = x1 + LED_SIZE
-                y2 = y1 + LED_SIZE
-                circle = self.canvas.create_oval(x1, y1, x2, y2, fill=OFF_COLOR, outline="")
-                row_circles.append(circle)
-            self.led_circles.append(row_circles)
+                x1 = LED_SPACING + col * (LED_DIAMETER + LED_SPACING)
+                y1 = LED_SPACING + row * (LED_DIAMETER + LED_SPACING)
+                x2 = x1 + LED_DIAMETER
+                y2 = y1 + LED_DIAMETER
+                circle = self.canvas.create_oval(x1, y1, x2, y2, fill=INACTIVE_COLOR, outline="")
+                row_leds.append(circle)
+            self.leds.append(row_leds)
 
-    def update_led_matrix(self, pattern, animation=False):
-        """
-        Updates the LED matrix preview based on the provided pattern.
-        :param pattern: List of 8 integers (0-255) representing the LED pattern.
-        :param animation: Boolean indicating if the update is for animation playback.
-        """
+    def update_leds(self, pattern, animation=False):
         for row, byte in enumerate(pattern):
-            # Convert byte to binary string, pad with zeros to ensure 8 bits
-            binary_str = bin(byte)[2:].zfill(8)
-            for col, bit in enumerate(binary_str):
-                color = ON_COLOR if bit == '1' else OFF_COLOR
-                self.canvas.itemconfig(self.led_circles[row][col], fill=color)
+            bits = bin(byte)[2:].zfill(8)
+            for col, bit in enumerate(bits):
+                color = ACTIVE_COLOR if bit == '1' else INACTIVE_COLOR
+                self.canvas.itemconfig(self.leds[row][col], fill=color)
         if not animation:
-            self.master.update_idletasks()  # Refresh the GUI immediately
+            self.master.update_idletasks()
 
-    def load_ui(self):
-        """
-        Opens a dedicated UI for loading patterns and animations with separate sections.
-        """
-        # Open a new window for loading patterns and animations
-        load_window = tk.Toplevel(self.master)
-        load_window.title("Load Pattern/Animation")
-        load_window.geometry("800x600")
-        load_window.resizable(False, False)
+    def toggle_buttons(self, event=None):
+        text = self.desc_entry.get().strip()
+        state = 'normal' if text else 'disabled'
+        self.gen_single_btn.configure(state=state)
+        self.gen_anim_btn.configure(state=state)
+        self.load_btn.configure(state=state)
 
-        # Frame for patterns and animations
-        frame = ttk.Frame(load_window, padding="10 10 10 10")
-        frame.pack(fill='both', expand=True)
-
-        # Split the window into two sections: Patterns and Animations
-        patterns_frame = ttk.LabelFrame(frame, text="Saved Patterns", padding="10 10 10 10")
-        patterns_frame.pack(side='left', fill='both', expand=True, padx=(0, 10), pady=(0, 0))
-
-        animations_frame = ttk.LabelFrame(frame, text="Saved Animations", padding="10 10 10 10")
-        animations_frame.pack(side='right', fill='both', expand=True, padx=(10, 0), pady=(0, 0))
-
-        # Populate Patterns Listbox
-        patterns_listbox_frame = ttk.Frame(patterns_frame)
-        patterns_listbox_frame.pack(fill='both', expand=True)
-
-        patterns_scrollbar = ttk.Scrollbar(patterns_listbox_frame, orient='vertical')
-        patterns_listbox = tk.Listbox(patterns_listbox_frame, font=self.font_labels, yscrollcommand=patterns_scrollbar.set)
-        patterns_scrollbar.config(command=patterns_listbox.yview)
-        patterns_scrollbar.pack(side='right', fill='y')
-        patterns_listbox.pack(side='left', fill='both', expand=True)
-
-        # Populate Animations Listbox
-        animations_listbox_frame = ttk.Frame(animations_frame)
-        animations_listbox_frame.pack(fill='both', expand=True)
-
-        animations_scrollbar = ttk.Scrollbar(animations_listbox_frame, orient='vertical')
-        animations_listbox = tk.Listbox(animations_listbox_frame, font=self.font_labels, yscrollcommand=animations_scrollbar.set)
-        animations_scrollbar.config(command=animations_listbox.yview)
-        animations_scrollbar.pack(side='right', fill='y')
-        animations_listbox.pack(side='left', fill='both', expand=True)
-
-        # Populate listboxes with saved patterns and animations
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        save_dir = os.path.join(script_dir, "saved_patterns")
-        os.makedirs(save_dir, exist_ok=True)  # Ensure the directory exists
-        files = [f for f in os.listdir(save_dir) if f.endswith('.json')]
-
-        for file in files:
-            file_path = os.path.join(save_dir, file)
-            try:
-                data = load_saved_file(file_path)
-                file_type = data.get('type', '').lower()
-                if file_type == 'single':
-                    patterns_listbox.insert(tk.END, file)
-                elif file_type == 'animation':
-                    animations_listbox.insert(tk.END, file)
-                else:
-                    self.log(f"File '{file}' has unknown type '{data.get('type', 'unknown')}', skipping.", "info")
-            except Exception as e:
-                self.log(f"Error loading file '{file}': {e}", "error")
-                continue  # Skip invalid files
-
-        if not files:
-            messagebox.showinfo("No Saved Files", "No saved patterns or animations found.")
-            load_window.destroy()
-            return
-
-        # Preview Area
-        preview_frame = ttk.LabelFrame(frame, text="Preview Area", padding="10 10 10 10")
-        preview_frame.pack(fill='both', expand=False, padx=(0, 0), pady=(10, 0))
-
-        preview_label = ttk.Label(preview_frame, text="Preview Area\n(Coming Soon)", anchor='center', font=self.font_labels)
-        preview_label.pack(expand=True, fill='both')
-
-        # Bind selection events to update preview
-        patterns_listbox.bind('<<ListboxSelect>>', lambda event: self.update_preview(patterns_listbox, 'pattern'))
-        animations_listbox.bind('<<ListboxSelect>>', lambda event: self.update_preview(animations_listbox, 'animation'))
-
-        # Load Buttons
-        load_patterns_btn = ttk.Button(patterns_frame, text="Load Selected Pattern", command=lambda: self.load_selected_file(patterns_listbox, 'single', load_window))
-        load_patterns_btn.pack(pady=(10, 0))
-
-        load_animations_btn = ttk.Button(animations_frame, text="Load Selected Animation", command=lambda: self.load_selected_file(animations_listbox, 'animation', load_window))
-        load_animations_btn.pack(pady=(10, 0))
-
-    def update_preview(self, listbox, file_type):
-        """
-        Updates the preview area based on the selected pattern or animation.
-        :param listbox: The Listbox widget containing files.
-        :param file_type: 'pattern' or 'animation'.
-        """
-        selected = listbox.curselection()
-        if not selected:
-            return
-        file_name = listbox.get(selected[0])
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        save_dir = os.path.join(script_dir, "saved_patterns")
-        file_path = os.path.join(save_dir, file_name)
-        try:
-            data = load_saved_file(file_path)
-            if data['type'].lower() == 'single' and file_type == 'pattern':
-                pattern = data['pattern']
-                self.current_pattern = pattern.copy()
-                self.current_animation = None
-                self.is_animation = False
-                self.current_file_path = file_path  # Store the current file path
-                self.update_led_matrix(pattern, animation=False)
-                self.edit_btn.configure(state='normal')
-                self.publish_btn.configure(state='normal')
-            elif data['type'].lower() == 'animation' and file_type == 'animation':
-                patterns = data['patterns']
-                self.current_animation = [p.copy() for p in patterns]
-                self.current_pattern = None
-                self.is_animation = True
-                self.current_file_path = file_path  # Store the current file path
-                # Start animation playback in preview
-                self.update_led_matrix(patterns[0], animation=True)
-                self.edit_btn.configure(state='normal')
-                self.publish_btn.configure(state='normal')
-            else:
-                self.log(f"File '{file_name}' type mismatch.", "error")
-        except Exception as e:
-            self.log(f"Error loading file '{file_name}': {e}", "error")
-
-    def play_animation_preview(self, patterns):
-        """
-        Plays the animation in the preview canvas.
-        :param patterns: List of patterns representing each frame.
-        """
-        for pattern in patterns:
-            self.update_led_matrix(pattern, animation=True)
-            time.sleep(ANIMATION_DELAY / 1000)  # Convert ms to seconds
-
-    def load_selected_file(self, listbox, file_type, window):
-        selected = listbox.curselection()
-        if not selected:
-            messagebox.showwarning("No Selection", f"Please select a {file_type} to load.")
-            return
-        file_name = listbox.get(selected[0])
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        save_dir = os.path.join(script_dir, "saved_patterns")
-        file_path = os.path.join(save_dir, file_name)
-        try:
-            data = load_saved_file(file_path)
-            if data['type'].lower() == file_type:
-                if file_type == 'single':
-                    pattern = data['pattern']
-                    self.log(f"Loading pattern from '{file_name}'.", "info")
-                    self.current_pattern = pattern.copy()
-                    self.current_animation = None
-                    self.is_animation = False
-                    self.current_file_path = file_path  # Store the current file path
-                    self.update_led_matrix(pattern, animation=False)
-                    self.edit_btn.configure(state='normal')
-                    self.publish_btn.configure(state='normal')
-                elif file_type == 'animation':
-                    patterns = data['patterns']
-                    self.log(f"Loading animation from '{file_name}'.", "info")
-                    self.current_animation = [p.copy() for p in patterns]
-                    self.current_pattern = None
-                    self.is_animation = True
-                    self.current_file_path = file_path  # Store the current file path
-                    self.update_led_matrix(patterns[0], animation=True)
-                    self.edit_btn.configure(state='normal')
-                    self.publish_btn.configure(state='normal')
-                window.destroy()
-            else:
-                self.log(f"Selected file '{file_name}' is not of type '{file_type}'.", "error")
-        except Exception as e:
-            self.log(f"Error loading file '{file_name}': {e}", "error")
-
-    def create_tooltip(self, widget, text):
-        tooltip = Tooltip(widget, text)
-
-    def check_input(self, event=None):
-        """Enable buttons only if there is input."""
-        input_text = self.desc_entry.get().strip()
-        if input_text:
-            self.single_btn.configure(state='normal')
-            self.animate_btn.configure(state='normal')
-            self.load_btn.configure(state='normal')
-        else:
-            self.single_btn.configure(state='disabled')
-            self.animate_btn.configure(state='disabled')
-            self.load_btn.configure(state='disabled')
-
-    def log(self, message, msg_type="info"):
-        """Log messages with different colors based on type."""
+    def log(self, msg, level="info"):
         self.log_area.config(state='normal')
         timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-        if msg_type == "error":
-            self.log_area.insert(tk.END, f"{timestamp} - ", ("timestamp", "error"))
-            self.log_area.insert(tk.END, f"{message}\n", ("message", "error"))
-        elif msg_type == "success":
-            self.log_area.insert(tk.END, f"{timestamp} - ", ("timestamp", "success"))
-            self.log_area.insert(tk.END, f"{message}\n", ("message", "success"))
+        if level == "error":
+            self.log_area.insert(tk.END, f"{timestamp} - {msg}\n", ("error",))
+        elif level == "success":
+            self.log_area.insert(tk.END, f"{timestamp} - {msg}\n", ("success",))
         else:
-            self.log_area.insert(tk.END, f"{timestamp} - ", ("timestamp",))
-            self.log_area.insert(tk.END, f"{message}\n", ("message",))
-        self.log_area.tag_configure("timestamp", foreground=self.accent_color, font=self.font_log)
-        self.log_area.tag_configure("message", foreground=self.text_color, font=self.font_log)
-        self.log_area.tag_configure("error", foreground=self.error_color, font=self.font_log)
-        self.log_area.tag_configure("success", foreground=self.success_color, font=self.font_log)
+            self.log_area.insert(tk.END, f"{timestamp} - {msg}\n")
+        self.log_area.tag_config("error", foreground="#cf6679")
+        self.log_area.tag_config("success", foreground="#03dac6")
         self.log_area.see(tk.END)
         self.log_area.config(state='disabled')
 
-    def generate_single_pattern(self):
-        description = self.desc_entry.get().strip()
-        if not description:
-            messagebox.showwarning("Input Required", "Please enter a pattern description.")
+    def gen_single(self):
+        desc = self.desc_entry.get().strip()
+        if not desc:
+            messagebox.showwarning("Input Needed", "Enter a pattern description.")
             return
-        # Disable buttons and show loading
-        self.disable_buttons()
+        self.disable_all_buttons()
         self.log("Generating single pattern...", "info")
-        threading.Thread(target=self.process_single_pattern, args=(description,), daemon=True).start()
+        threading.Thread(target=self.generate_single_pattern, args=(desc,), daemon=True).start()
 
-    def generate_animation(self):
-        description = self.desc_entry.get().strip()
-        if not description:
-            messagebox.showwarning("Input Required", "Please enter a pattern description.")
-            return
-        # Disable buttons and show loading
-        self.disable_buttons()
-        self.log("Generating animation...", "info")
-        threading.Thread(target=self.process_animation, args=(description,), daemon=True).start()
-
-    def process_single_pattern(self, description):
-        pattern = generate_patterns_from_ai(description, animation=False, log_callback=self.log)
+    def generate_single_pattern(self, desc):
+        pattern = generate_patterns(desc, animation=False, logger=self.log)
         if pattern:
-            self.log(f"Generated pattern: {pattern}", "success")
+            self.log(f"Pattern: {pattern}", "success")
             self.current_pattern = pattern.copy()
             self.current_animation = None
             self.is_animation = False
-            self.current_file_path = None  # Reset current file path
-            # Prompt user to save
-            save = messagebox.askyesno("Save Pattern", "Do you want to save this pattern?")
+            self.current_file = None
+            save = messagebox.askyesno("Save Pattern", "Save this pattern?")
             if save:
-                filename = sanitize_filename(description) + '.json'
-                saved_path = save_pattern(pattern, name=filename)
-                if saved_path:
+                filename = clean_filename(desc) + '.json'
+                saved = save_single_pattern(pattern, name=filename)
+                if saved:
                     self.log(f"Pattern saved as '{filename}'.", "success")
-                    self.current_file_path = saved_path  # Update current file path
+                    self.current_file = saved
                 else:
-                    self.log(f"Failed to save pattern as '{filename}'.", "error")
-            # Send pattern to Arduino and update preview
-            send_single_pattern(self.ser, pattern, log_callback=self.log, preview_callback=self.update_led_matrix)
-            self.log("Single pattern sent successfully.", "success")
+                    self.log(f"Failed to save '{filename}'.", "error")
+            send_single_frame(self.serial_conn, pattern, logger=self.log, update_preview=self.update_leds)
+            self.log("Pattern sent.", "success")
             self.publish_btn.configure(state='normal')
             self.edit_btn.configure(state='normal')
         else:
-            self.log("Failed to generate single pattern. Please try again.", "error")
+            self.log("Failed to generate pattern.", "error")
         self.enable_buttons()
 
-    def process_animation(self, description):
-        patterns = generate_patterns_from_ai(description, animation=True, num_frames=5, log_callback=self.log)
-        if patterns:
-            self.log(f"Generated {len(patterns)} frames for animation.", "success")
-            self.current_animation = [p.copy() for p in patterns]
+    def gen_animation(self):
+        desc = self.desc_entry.get().strip()
+        if not desc:
+            messagebox.showwarning("Input Needed", "Enter a pattern description.")
+            return
+        self.disable_all_buttons()
+        self.log("Generating animation...", "info")
+        threading.Thread(target=self.generate_animation_patterns, args=(desc,), daemon=True).start()
+
+    def generate_animation_patterns(self, desc):
+        frames = generate_patterns(desc, animation=True, frame_count=5, logger=self.log)
+        if frames:
+            self.log(f"Generated {len(frames)} frames.", "success")
+            self.current_animation = [f.copy() for f in frames]
             self.current_pattern = None
             self.is_animation = True
-            self.current_file_path = None  # Reset current file path
-            # Prompt user to save
-            save = messagebox.askyesno("Save Animation", "Do you want to save this animation?")
+            self.current_file = None
+            save = messagebox.askyesno("Save Animation", "Save this animation?")
             if save:
-                filename = sanitize_filename(description) + '.json'
-                saved_path = save_animation(patterns, name=filename)
-                if saved_path:
+                filename = clean_filename(desc) + '.json'
+                saved = save_animation_frames(frames, name=filename)
+                if saved:
                     self.log(f"Animation saved as '{filename}'.", "success")
-                    self.current_file_path = saved_path  # Update current file path
+                    self.current_file = saved
                 else:
-                    self.log(f"Failed to save animation as '{filename}'.", "error")
-            # Send animation to Arduino and play in preview
-            send_animation(self.ser, patterns, log_callback=self.log, preview_callback=self.update_led_matrix)
-            self.log("Animation sent successfully.", "success")
+                    self.log(f"Failed to save '{filename}'.", "error")
+            send_animation(self.serial_conn, frames, logger=self.log, animator=self.anim_manager)
+            self.log("Animation sent.", "success")
             self.publish_btn.configure(state='normal')
             self.edit_btn.configure(state='normal')
         else:
-            self.log("Failed to generate animation patterns. Please try again.", "error")
+            self.log("Failed to generate animation.", "error")
         self.enable_buttons()
 
-    def disable_buttons(self):
-        self.single_btn.configure(state='disabled')
-        self.animate_btn.configure(state='disabled')
+    def disable_all_buttons(self):
+        self.gen_single_btn.configure(state='disabled')
+        self.gen_anim_btn.configure(state='disabled')
         self.load_btn.configure(state='disabled')
         self.edit_btn.configure(state='disabled')
         self.publish_btn.configure(state='disabled')
 
     def enable_buttons(self):
-        input_text = self.desc_entry.get().strip()
-        if input_text:
-            self.single_btn.configure(state='normal')
-            self.animate_btn.configure(state='normal')
-            self.load_btn.configure(state='normal')
-        # Edit and Publish buttons are enabled based on actions
+        text = self.desc_entry.get().strip()
+        state = 'normal' if text else 'disabled'
+        self.gen_single_btn.configure(state=state)
+        self.gen_anim_btn.configure(state=state)
+        self.load_btn.configure(state=state)
+
+    def load_ui(self):
+        load_window = tk.Toplevel(self.master)
+        load_window.title("Load Pattern/Animation")
+        load_window.geometry("800x600")
+        load_window.resizable(False, False)
+
+        frame = ttk.Frame(load_window, padding="10 10 10 10")
+        frame.pack(fill='both', expand=True)
+
+        patterns_frame = ttk.LabelFrame(frame, text="Saved Patterns", padding="10 10 10 10")
+        patterns_frame.pack(side='left', fill='both', expand=True, padx=(0, 10))
+
+        anims_frame = ttk.LabelFrame(frame, text="Saved Animations", padding="10 10 10 10")
+        anims_frame.pack(side='right', fill='both', expand=True, padx=(10, 0))
+
+        # Patterns Listbox
+        p_list_frame = ttk.Frame(patterns_frame)
+        p_list_frame.pack(fill='both', expand=True)
+        p_scroll = ttk.Scrollbar(p_list_frame, orient='vertical')
+        p_list = tk.Listbox(p_list_frame, font=self.label_font, yscrollcommand=p_scroll.set)
+        p_scroll.config(command=p_list.yview)
+        p_scroll.pack(side='right', fill='y')
+        p_list.pack(side='left', fill='both', expand=True)
+
+        # Animations Listbox
+        a_list_frame = ttk.Frame(anims_frame)
+        a_list_frame.pack(fill='both', expand=True)
+        a_scroll = ttk.Scrollbar(a_list_frame, orient='vertical')
+        a_list = tk.Listbox(a_list_frame, font=self.label_font, yscrollcommand=a_scroll.set)
+        a_scroll.config(command=a_list.yview)
+        a_scroll.pack(side='right', fill='y')
+        a_list.pack(side='left', fill='both', expand=True)
+
+        # Populate Listboxes
+        saved_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_patterns")
+        os.makedirs(saved_dir, exist_ok=True)
+        files = [f for f in os.listdir(saved_dir) if f.endswith('.json')]
+        for f in files:
+            path = os.path.join(saved_dir, f)
+            try:
+                data = load_saved(path)
+                if data.get('type') == 'single':
+                    p_list.insert(tk.END, f)
+                elif data.get('type') == 'animation':
+                    a_list.insert(tk.END, f)
+            except:
+                continue
+
+        if not files:
+            messagebox.showinfo("No Files", "No saved patterns or animations found.")
+            load_window.destroy()
+            return
+
+        # Preview Area
+        preview = ttk.LabelFrame(frame, text="Preview Area", padding="10 10 10 10")
+        preview.pack(fill='both', expand=False, padx=(0, 0), pady=(10, 0))
+        preview_label = ttk.Label(preview, text="Preview Coming Soon", anchor='center', font=self.label_font)
+        preview_label.pack(expand=True, fill='both')
+
+        # Bind selection
+        p_list.bind('<<ListboxSelect>>', lambda e: self.preview_selection(p_list, 'single'))
+        a_list.bind('<<ListboxSelect>>', lambda e: self.preview_selection(a_list, 'animation'))
+
+        # Load Buttons
+        load_p_btn = ttk.Button(patterns_frame, text="Load Pattern", command=lambda: self.load_file(p_list, 'single', load_window))
+        load_p_btn.pack(pady=(10, 0))
+
+        load_a_btn = ttk.Button(anims_frame, text="Load Animation", command=lambda: self.load_file(a_list, 'animation', load_window))
+        load_a_btn.pack(pady=(10, 0))
+
+    def preview_selection(self, listbox, file_type):
+        selected = listbox.curselection()
+        if not selected:
+            return
+        filename = listbox.get(selected[0])
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_patterns", filename)
+        try:
+            data = load_saved(path)
+            if data.get('type') != file_type:
+                self.log(f"Type mismatch for '{filename}'.", "error")
+                return
+            if file_type == 'single':
+                pattern = data.get('pattern')
+                self.current_pattern = pattern.copy()
+                self.current_animation = None
+                self.is_animation = False
+                self.current_file = path
+                self.update_leds(pattern, animation=False)
+                self.edit_btn.configure(state='normal')
+                self.publish_btn.configure(state='normal')
+            elif file_type == 'animation':
+                frames = data.get('patterns')
+                self.current_animation = [f.copy() for f in frames]
+                self.current_pattern = None
+                self.is_animation = True
+                self.current_file = path
+                self.anim_manager.start(frames)
+                self.edit_btn.configure(state='normal')
+                self.publish_btn.configure(state='normal')
+        except:
+            self.log(f"Failed to load '{filename}'.", "error")
+
+    def load_file(self, listbox, file_type, window):
+        selected = listbox.curselection()
+        if not selected:
+            messagebox.showwarning("Select File", f"Choose a {file_type} to load.")
+            return
+        filename = listbox.get(selected[0])
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_patterns", filename)
+        try:
+            data = load_saved(path)
+            if data.get('type') != file_type:
+                self.log(f"Type mismatch for '{filename}'.", "error")
+                return
+            if file_type == 'single':
+                pattern = data.get('pattern')
+                self.current_pattern = pattern.copy()
+                self.current_animation = None
+                self.is_animation = False
+                self.current_file = path
+                self.update_leds(pattern, animation=False)
+                self.edit_btn.configure(state='normal')
+                self.publish_btn.configure(state='normal')
+            elif file_type == 'animation':
+                frames = data.get('patterns')
+                self.current_animation = [f.copy() for f in frames]
+                self.current_pattern = None
+                self.is_animation = True
+                self.current_file = path
+                self.anim_manager.start(frames)
+                self.edit_btn.configure(state='normal')
+                self.publish_btn.configure(state='normal')
+            window.destroy()
+        except:
+            self.log(f"Failed to load '{filename}'.", "error")
 
     def edit_current(self):
         if self.is_animation:
             self.edit_animation()
         elif self.current_pattern:
-            self.edit_single_pattern()
+            self.edit_pattern()
 
-    def edit_single_pattern(self):
-        """
-        Opens a window to edit the current single pattern by toggling LEDs.
-        """
-        edit_window = tk.Toplevel(self.master)
-        edit_window.title("Edit Single Pattern")
-        edit_window.geometry("400x400")
-        edit_window.resizable(False, False)
+    def edit_pattern(self):
+        edit_win = tk.Toplevel(self.master)
+        edit_win.title("Edit Pattern")
+        edit_win.geometry("400x400")
+        edit_win.resizable(False, False)
 
-        # Create a Canvas for editing
-        edit_canvas = tk.Canvas(edit_window, width=LED_SIZE * 8 + LED_PADDING * 9,
-                               height=LED_SIZE * 8 + LED_PADDING * 9, bg="#000000")
-        edit_canvas.pack(pady=20)
+        canvas = tk.Canvas(edit_win, width=LED_DIAMETER * 8 + LED_SPACING * 9,
+                           height=LED_DIAMETER * 8 + LED_SPACING * 9, bg="#000000")
+        canvas.pack(pady=20)
 
-        # Initialize LED circles and store their references
-        led_circles = []
+        circles = []
         for row in range(8):
             row_circles = []
             for col in range(8):
-                x1 = LED_PADDING + col * (LED_SIZE + LED_PADDING)
-                y1 = LED_PADDING + row * (LED_SIZE + LED_PADDING)
-                x2 = x1 + LED_SIZE
-                y2 = y1 + LED_SIZE
-                color = ON_COLOR if self.current_pattern[row] & (1 << (7 - col)) else OFF_COLOR
-                circle = edit_canvas.create_oval(x1, y1, x2, y2, fill=color, outline="")
+                x1 = LED_SPACING + col * (LED_DIAMETER + LED_SPACING)
+                y1 = LED_SPACING + row * (LED_DIAMETER + LED_SPACING)
+                x2 = x1 + LED_DIAMETER
+                y2 = y1 + LED_DIAMETER
+                bit = self.current_pattern[row] & (1 << (7 - col))
+                color = ACTIVE_COLOR if bit else INACTIVE_COLOR
+                circle = canvas.create_oval(x1, y1, x2, y2, fill=color, outline="")
                 row_circles.append(circle)
-            led_circles.append(row_circles)
+            circles.append(row_circles)
 
         def toggle_led(event):
             x, y = event.x, event.y
-            for row in range(8):
-                for col in range(8):
-                    coords = edit_canvas.coords(led_circles[row][col])
+            for r in range(8):
+                for c in range(8):
+                    coords = canvas.coords(circles[r][c])
                     if coords[0] <= x <= coords[2] and coords[1] <= y <= coords[3]:
-                        current_color = edit_canvas.itemcget(led_circles[row][col], "fill")
-                        new_color = OFF_COLOR if current_color == ON_COLOR else ON_COLOR
-                        edit_canvas.itemconfig(led_circles[row][col], fill=new_color)
-                        # Update the pattern
-                        if new_color == ON_COLOR:
-                            self.current_pattern[row] |= (1 << (7 - col))
+                        current = canvas.itemcget(circles[r][c], "fill")
+                        new = INACTIVE_COLOR if current == ACTIVE_COLOR else ACTIVE_COLOR
+                        canvas.itemconfig(circles[r][c], fill=new)
+                        if new == ACTIVE_COLOR:
+                            self.current_pattern[r] |= (1 << (7 - c))
                         else:
-                            self.current_pattern[row] &= ~(1 << (7 - col))
+                            self.current_pattern[r] &= ~(1 << (7 - c))
                         break
 
-        edit_canvas.bind("<Button-1>", toggle_led)
+        canvas.bind("<Button-1>", toggle_led)
 
-        # Save Button
-        save_btn = ttk.Button(edit_window, text="Save Changes", command=lambda: self.save_edit_single(edit_window))
+        save_btn = ttk.Button(edit_win, text="Save", command=lambda: self.save_edited_pattern(edit_win))
         save_btn.pack(pady=10)
 
-    def save_edit_single(self, window):
-        """
-        Saves the edited single pattern and updates the preview and Arduino.
-        """
-        # Send the edited pattern to Arduino and update preview
-        send_single_pattern(self.ser, self.current_pattern, log_callback=self.log, preview_callback=self.update_led_matrix)
-        self.log("Edited single pattern published successfully.", "success")
+    def save_edited_pattern(self, window):
+        send_single_frame(self.serial_conn, self.current_pattern, logger=self.log, update_preview=self.update_leds)
+        self.log("Edited pattern sent.", "success")
         window.destroy()
 
     def edit_animation(self):
-        """
-        Opens a window to edit the current animation by selecting and toggling LEDs in frames.
-        """
         if not self.current_animation:
             self.log("No animation to edit.", "error")
             return
+        edit_win = tk.Toplevel(self.master)
+        edit_win.title("Edit Animation")
+        edit_win.geometry("600x700")
+        edit_win.resizable(False, False)
 
-        edit_window = tk.Toplevel(self.master)
-        edit_window.title("Edit Animation")
-        edit_window.geometry("600x700")
-        edit_window.resizable(False, False)
+        sel_frame = ttk.Frame(edit_win, padding="10 10 10 10")
+        sel_frame.pack(fill='x')
 
-        # Frame for selecting frames
-        frame_selection = ttk.Frame(edit_window, padding="10 10 10 10")
-        frame_selection.pack(fill='x')
-
-        frame_label = ttk.Label(frame_selection, text="Select Frame to Edit:")
-        frame_label.pack(side='left', padx=(0, 10))
+        sel_label = ttk.Label(sel_frame, text="Select Frame:")
+        sel_label.pack(side='left', padx=(0, 10))
 
         frame_var = tk.IntVar(value=0)
-        frame_radio_buttons = []
         for i in range(len(self.current_animation)):
-            rb = ttk.Radiobutton(frame_selection, text=f"Frame {i+1}", variable=frame_var, value=i)
+            rb = ttk.Radiobutton(sel_frame, text=f"Frame {i+1}", variable=frame_var, value=i, command=lambda: update_canvas(frame_var.get()))
             rb.pack(side='left')
-            frame_radio_buttons.append(rb)
 
-        # Create a Canvas for editing
-        edit_canvas = tk.Canvas(edit_window, width=LED_SIZE * 8 + LED_PADDING * 9,
-                               height=LED_SIZE * 8 + LED_PADDING * 9, bg="#000000")
-        edit_canvas.pack(pady=20)
+        canvas = tk.Canvas(edit_win, width=LED_DIAMETER * 8 + LED_SPACING * 9,
+                           height=LED_DIAMETER * 8 + LED_SPACING * 9, bg="#000000")
+        canvas.pack(pady=20)
 
-        # Initialize LED circles and store their references
-        led_circles = []
+        circles = []
         for row in range(8):
             row_circles = []
             for col in range(8):
-                x1 = LED_PADDING + col * (LED_SIZE + LED_PADDING)
-                y1 = LED_PADDING + row * (LED_SIZE + LED_PADDING)
-                x2 = x1 + LED_SIZE
-                y2 = y1 + LED_SIZE
-                color = ON_COLOR if self.current_animation[0][row] & (1 << (7 - col)) else OFF_COLOR
-                circle = edit_canvas.create_oval(x1, y1, x2, y2, fill=color, outline="")
+                x1 = LED_SPACING + col * (LED_DIAMETER + LED_SPACING)
+                y1 = LED_SPACING + row * (LED_DIAMETER + LED_SPACING)
+                x2 = x1 + LED_DIAMETER
+                y2 = y1 + LED_DIAMETER
+                bit = self.current_animation[0][row] & (1 << (7 - col))
+                color = ACTIVE_COLOR if bit else INACTIVE_COLOR
+                circle = canvas.create_oval(x1, y1, x2, y2, fill=color, outline="")
                 row_circles.append(circle)
-            led_circles.append(row_circles)
+            circles.append(row_circles)
 
-        def update_canvas(frame_index):
-            pattern = self.current_animation[frame_index]
-            for row in range(8):
-                binary_str = bin(pattern[row])[2:].zfill(8)
-                for col, bit in enumerate(binary_str):
-                    color = ON_COLOR if bit == '1' else OFF_COLOR
-                    edit_canvas.itemconfig(led_circles[row][col], fill=color)
-
-        def on_frame_select():
-            frame_index = frame_var.get()
-            update_canvas(frame_index)
-
-        # Initialize with the first frame
-        update_canvas(0)
-
-        # Bind frame selection
-        for rb in frame_radio_buttons:
-            rb.configure(command=on_frame_select)
+        def update_canvas(index):
+            pattern = self.current_animation[index]
+            for r in range(8):
+                bits = bin(pattern[r])[2:].zfill(8)
+                for c, bit in enumerate(bits):
+                    color = ACTIVE_COLOR if bit == '1' else INACTIVE_COLOR
+                    canvas.itemconfig(circles[r][c], fill=color)
 
         def toggle_led(event):
             x, y = event.x, event.y
-            frame_index = frame_var.get()
-            for row in range(8):
-                for col in range(8):
-                    coords = edit_canvas.coords(led_circles[row][col])
+            idx = frame_var.get()
+            for r in range(8):
+                for c in range(8):
+                    coords = canvas.coords(circles[r][c])
                     if coords[0] <= x <= coords[2] and coords[1] <= y <= coords[3]:
-                        current_color = edit_canvas.itemcget(led_circles[row][col], "fill")
-                        new_color = OFF_COLOR if current_color == ON_COLOR else ON_COLOR
-                        edit_canvas.itemconfig(led_circles[row][col], fill=new_color)
-                        # Update the pattern
-                        if new_color == ON_COLOR:
-                            self.current_animation[frame_index][row] |= (1 << (7 - col))
+                        current = canvas.itemcget(circles[r][c], "fill")
+                        new = INACTIVE_COLOR if current == ACTIVE_COLOR else ACTIVE_COLOR
+                        canvas.itemconfig(circles[r][c], fill=new)
+                        if new == ACTIVE_COLOR:
+                            self.current_animation[idx][r] |= (1 << (7 - c))
                         else:
-                            self.current_animation[frame_index][row] &= ~(1 << (7 - col))
+                            self.current_animation[idx][r] &= ~(1 << (7 - c))
                         break
 
-        edit_canvas.bind("<Button-1>", toggle_led)
+        canvas.bind("<Button-1>", toggle_led)
 
-        # Save Button
-        save_btn = ttk.Button(edit_window, text="Save Changes", command=lambda: self.save_edit_animation(edit_window))
+        save_btn = ttk.Button(edit_win, text="Save", command=lambda: self.save_edited_animation(edit_win))
         save_btn.pack(pady=10)
 
-    def save_edit_animation(self, window):
-        """
-        Saves the edited animation and updates the Arduino and preview.
-        """
-        # Send the edited animation to Arduino and update preview
-        send_animation(self.ser, self.current_animation, log_callback=self.log, preview_callback=self.update_led_matrix)
-        self.log("Edited animation published successfully.", "success")
+    def save_edited_animation(self, window):
+        send_animation(self.serial_conn, self.current_animation, logger=self.log, animator=self.anim_manager)
+        self.log("Edited animation sent.", "success")
         window.destroy()
 
     def publish_current(self):
-        """
-        Publishes the current pattern or animation to the Arduino and saves it to the current file.
-        """
-        if self.current_file_path is None:
-            self.log("No file is currently loaded to publish.", "error")
+        if not self.current_file:
+            self.log("No file loaded to publish.", "error")
             return
-
         if self.is_animation and self.current_animation:
-            # Save the edited animation to the existing file with overwrite
             try:
-                data = {
-                    'type': 'animation',
-                    'patterns': self.current_animation
-                }
-                with open(self.current_file_path, 'w') as f:
+                data = {'type': 'animation', 'patterns': self.current_animation}
+                with open(self.current_file, 'w') as f:
                     json.dump(data, f, indent=4)
-                self.log(f"Animation saved to '{os.path.basename(self.current_file_path)}'.", "success")
-            except Exception as e:
-                self.log(f"Failed to save animation: {e}", "error")
+                self.log(f"Animation saved to '{os.path.basename(self.current_file)}'.", "success")
+            except:
+                self.log("Failed to save animation.", "error")
                 return
-            # Send to Arduino
-            send_animation(self.ser, self.current_animation, log_callback=self.log, preview_callback=self.update_led_matrix)
-            self.log("Animation published successfully.", "success")
+            send_animation(self.serial_conn, self.current_animation, logger=self.log, animator=self.anim_manager)
+            self.log("Animation published.", "success")
         elif not self.is_animation and self.current_pattern:
-            # Save the edited pattern to the existing file with overwrite
             try:
-                data = {
-                    'type': 'single',
-                    'pattern': self.current_pattern
-                }
-                with open(self.current_file_path, 'w') as f:
+                data = {'type': 'single', 'pattern': self.current_pattern}
+                with open(self.current_file, 'w') as f:
                     json.dump(data, f, indent=4)
-                self.log(f"Pattern saved to '{os.path.basename(self.current_file_path)}'.", "success")
-            except Exception as e:
-                self.log(f"Failed to save pattern: {e}", "error")
+                self.log(f"Pattern saved to '{os.path.basename(self.current_file)}'.", "success")
+            except:
+                self.log("Failed to save pattern.", "error")
                 return
-            # Send to Arduino
-            send_single_pattern(self.ser, self.current_pattern, log_callback=self.log, preview_callback=self.update_led_matrix)
-            self.log("Pattern published successfully.", "success")
+            send_single_frame(self.serial_conn, self.current_pattern, logger=self.log, update_preview=self.update_leds)
+            self.log("Pattern published.", "success")
         else:
-            self.log("No pattern or animation to publish.", "error")
+            self.log("Nothing to publish.", "error")
 
-    def exit_application(self):
-        if messagebox.askokcancel("Exit", "Do you really want to exit?"):
+    def exit_app(self):
+        if messagebox.askokcancel("Exit", "Exit the application?"):
             try:
-                self.ser.close()
+                self.serial_conn.close()
                 self.log("Serial connection closed.", "info")
             except:
                 pass
             self.master.destroy()
 
-# Tooltip Class
 class Tooltip:
-    """
-    It creates a tooltip for a given widget as the mouse goes on it.
-    """
-    def __init__(self, widget, text='widget info'):
-        self.waittime = 500     # milliseconds
-        self.wraplength = 300   # pixels
+    def __init__(self, widget, text=''):
+        self.waittime = 500
+        self.wraplength = 300
         self.widget = widget
         self.text = text
-        self.widget.bind("<Enter>", self.on_enter)
-        self.widget.bind("<Leave>", self.on_leave)
-        self.widget.bind("<ButtonPress>", self.on_leave)
+        self.widget.bind("<Enter>", self.show)
+        self.widget.bind("<Leave>", self.hide)
         self.id = None
         self.tw = None
 
-    def on_enter(self, event=None):
+    def show(self, event=None):
         self.schedule()
 
-    def on_leave(self, event=None):
+    def hide(self, event=None):
         self.unschedule()
         self.hide_tooltip()
 
     def schedule(self):
         self.unschedule()
-        self.id = self.widget.after(self.waittime, self.show_tooltip)
+        self.id = self.widget.after(self.waittime, self.create_tooltip)
 
     def unschedule(self):
         _id = self.id
@@ -1074,36 +878,36 @@ class Tooltip:
         if _id:
             self.widget.after_cancel(_id)
 
-    def show_tooltip(self, event=None):
-        x = y = 0
-        try:
-            x, y, cx, cy = self.widget.bbox("insert")
-        except:
-            x, y = 0, 0
+    def create_tooltip(self, event=None):
+        x, y, cx, cy = self.widget.bbox("insert")
         x += self.widget.winfo_rootx() + 25
         y += self.widget.winfo_rooty() + 20
-        # Creates a toplevel window
         self.tw = tk.Toplevel(self.widget)
-        # Leaves only the label and removes the app window
         self.tw.wm_overrideredirect(True)
         self.tw.wm_geometry(f"+{x}+{y}")
-        label = tk.Label(self.tw, text=self.text, justify='left',
-                         background="#333333", foreground="white",
-                         relief='solid', borderwidth=1,
-                         wraplength=self.wraplength, font=("Helvetica", 10))
+        label = tk.Label(
+            self.tw,
+            text=self.text,
+            justify='left',
+            background="#333333",
+            foreground="white",
+            relief='solid',
+            borderwidth=1,
+            wraplength=self.wraplength,
+            font=("Helvetica", 10)
+        )
         label.pack(ipadx=1)
 
     def hide_tooltip(self):
         tw = self.tw
-        self.tw= None
+        self.tw = None
         if tw:
             tw.destroy()
 
-# Main Function
 def main():
     root = tk.Tk()
     app = LEDMatrixApp(root)
-    root.protocol("WM_DELETE_WINDOW", app.exit_application)
+    root.protocol("WM_DELETE_WINDOW", app.exit_app)
     root.mainloop()
 
 if __name__ == "__main__":
