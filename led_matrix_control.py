@@ -13,6 +13,7 @@ import threading
 import json
 import queue
 import logging
+import random
 
 # Configure logging
 logging.basicConfig(
@@ -34,6 +35,12 @@ MAX_ANIMATION_FRAMES = 10
 
 # Load environment variables
 load_dotenv()
+api_key = os.getenv('GLHF_API_KEY')
+if not api_key:
+    raise ValueError("GLHF_API_KEY not set in environment.")
+
+openai.api_key = api_key
+openai.api_base = "https://glhf.chat/api/openai/v1"
 
 def find_arduino_port():
     patterns = ['/dev/cu.usbserial*', '/dev/ttyUSB*', '/dev/ttyACM*', 'COM3', 'COM4']
@@ -75,70 +82,191 @@ def initialize_serial_connection():
     logging.info("Serial connection established.")
     return ser
 
-api_key = os.getenv('GLHF_API_KEY')
-if not api_key:
-    logging.error("GLHF_API_KEY not set.")
-    sys.exit(1)
-
-openai.api_key = api_key
-openai.api_base = 'https://glhf.chat/api/openai/v1'
-
 def clean_filename(name):
     return re.sub(r'[\\/*?:"<>|]',"", name)
 
-def generate_patterns(prompt, animation=False, frame_count=5, logger=None):
-    attempts, patterns = 0, []
-    while attempts < 3:
-        try:
-            if not animation:
-                response = openai.ChatCompletion.create(
-                    model='hf:meta-llama/Meta-Llama-3.1-405B-Instruct',
-                    messages=[
-                        {"role": "system", "content": "You are a helpful assistant."},
-                        {"role": "user", "content": f"Generate exactly 8 integers between 0 and 255 for '{prompt}'. Provide only the list separated by commas."}
-                    ]
-                )
-                raw = response.choices[0].message.content.strip()
-                if logger:
-                    logger(f"AI Response: {raw}")
-                raw = re.sub(r'[\[\]]', '', raw)
-                nums = [int(n) for n in re.split(r'[,\s]+', raw) if n.isdigit()]
-                if len(nums) >= 8 and all(0 <= n <= 255 for n in nums):
-                    return nums[:8]
-                if logger:
-                    logger(f"Attempt {attempts + 1}: Invalid pattern. Retrying...")
-            else:
-                temp_patterns = []
-                for i in range(frame_count):
-                    resp = openai.ChatCompletion.create(
-                        model='hf:meta-llama/Meta-Llama-3.1-405B-Instruct',
-                        messages=[
-                            {"role": "system", "content": "You are a helpful assistant."},
-                            {"role": "user", "content": f"Generate exactly 8 integers between 0 and 255 for frame {i+1} of '{prompt}'. Provide only the list separated by commas."}
-                        ]
-                    )
-                    raw_frame = resp.choices[0].message.content.strip()
-                    if logger:
-                        logger(f"AI Response Frame {i+1}: {raw_frame}")
-                    raw_frame = re.sub(r'[\[\]]', '', raw_frame)
-                    nums_frame = [int(n) for n in re.split(r'[,\s]+', raw_frame) if n.isdigit()]
-                    if len(nums_frame) >= 8 and all(0 <= n <= 255 for n in nums_frame):
-                        temp_patterns.append(nums_frame[:8])
-                    else:
-                        if logger:
-                            logger(f"Attempt {attempts + 1}: Invalid frame {i+1}. Retrying animation...")
-                        temp_patterns = []
-                        break
-                if temp_patterns:
-                    return temp_patterns
-        except openai.error.OpenAIError as e:
-            if logger:
-                logger(f"OpenAI Error: {e}")
-            return None
-        attempts += 1
-    if logger:
-        logger("Failed to generate patterns after multiple attempts.")
+def simple_symmetrical_pattern():
+    # Simple symmetrical pattern (diagonal line)
+    pattern = []
+    for i in range(8):
+        row_val = (1 << (7 - i)) | (1 << i)
+        pattern.append(row_val)
+    return pattern
+
+def simple_symmetrical_animation(frames=5):
+    return [simple_symmetrical_pattern() for _ in range(frames)]
+
+def parse_ai_response_to_numbers(raw, logger):
+    raw = raw.replace('[', '').replace(']', '')
+    nums = [n for n in re.split(r'[,\s]+', raw) if n.isdigit()]
+    if len(nums) < 8:
+        if logger:
+            logger("AI response doesn't contain enough integers.")
+        return None
+    nums_int = [int(x) for x in nums[:8] if x.isdigit()]
+    if len(nums_int) == 8 and all(0 <= n <= 255 for n in nums_int):
+        return nums_int
     return None
+
+def safe_chat_completion(model, messages, logger=None, stream=False):
+    try:
+        completion = openai.ChatCompletion.create(
+            model=model,
+            messages=messages,
+            stream=stream,
+        )
+        if stream:
+            content = ""
+            for chunk in completion:
+                if 'delta' in chunk.choices[0] and chunk.choices[0].delta.get('content'):
+                    content += chunk.choices[0].delta.content
+            return content.strip()
+        else:
+            if completion and completion.choices and completion.choices[0].message:
+                return completion.choices[0].message.content.strip()
+            else:
+                if logger:
+                    logger("Invalid response structure from AI.")
+                return None
+    except Exception as e:
+        if logger:
+            logger(f"OpenAI API call error: {e}")
+        return None
+
+def generate_patterns(prompt, animation=False, frame_count=5, logger=None, optimize=False):
+    system_content = (
+        "You are a helpful assistant. The user wants a visually meaningful 8x8 LED pattern. "
+        "Think of an 8x8 grid of LEDs as a small pixel canvas. Each of the 8 integers represents a row of 8 bits: "
+        "bit=1 means that LED is ON, bit=0 means that LED is OFF. The integer is the decimal value of that 8-bit row. "
+        "For example, if a row is 10000001 in binary, that's 129 in decimal. "
+        "You must create a pattern that visually represents the user's description. If the user says 'eye blinking', "
+        "produce frames that look like an eye opening and closing. "
+        "DO NOT provide extra text or brackets. Only EXACT 8 integers (0-255), separated by commas."
+    )
+    if optimize:
+        system_content += " Make the pattern symmetrical, simple, and visually appealing."
+
+    base_model = "hf:meta-llama/Meta-Llama-3.1-405B-Instruct"
+    attempts = 0
+    while attempts < 3:
+        if not animation:
+            user_content = (
+                f"Description: '{prompt}'\n\n"
+                "Generate 8 integers (0-255) for a visually meaningful 8x8 LED pattern. "
+                "Only the 8 integers separated by commas."
+            )
+            response = safe_chat_completion(base_model, [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_content}
+            ], logger=logger, stream=False)
+            if response:
+                nums = parse_ai_response_to_numbers(response, logger)
+                if nums:
+                    return nums
+                else:
+                    if logger:
+                        logger(f"Attempt {attempts+1}: Invalid single pattern. Retrying...")
+            else:
+                if logger:
+                    logger(f"Attempt {attempts+1}: No AI response. Retrying...")
+        else:
+            frames_list = []
+            success = True
+            for i in range(frame_count):
+                user_content = (
+                    f"Description: '{prompt}' (Frame {i+1})\n\n"
+                    "This is an animation. Each frame is 8 integers (0-255). "
+                    "Gradually change the pattern each frame to show motion. Only output 8 integers separated by commas."
+                )
+                response = safe_chat_completion(base_model, [
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": user_content}
+                ], logger=logger, stream=False)
+                if response:
+                    nums_frame = parse_ai_response_to_numbers(response, logger)
+                    if nums_frame:
+                        frames_list.append(nums_frame)
+                    else:
+                        success = False
+                        if logger:
+                            logger(f"Attempt {attempts+1}: Invalid frame {i+1}. Retrying animation...")
+                        break
+                else:
+                    success = False
+                    break
+            if success and len(frames_list) == frame_count:
+                return frames_list
+
+        attempts += 1
+        if logger:
+            logger(f"Attempt {attempts}: Retrying pattern generation...")
+
+    if logger:
+        logger("Failed to generate patterns. Using fallback symmetrical pattern.")
+    if animation:
+        return simple_symmetrical_animation(frame_count)
+    else:
+        return simple_symmetrical_pattern()
+
+def optimize_with_ai(current_data, is_animation=False, logger=None):
+    system_content = (
+        "You are a helpful assistant. The user provided an LED pattern/animation. "
+        "Optimize it to be symmetrical, simple, appealing. "
+        "Only output 8 integers per frame, separated by commas, no extra text."
+    )
+
+    base_model = "hf:meta-llama/Meta-Llama-3.1-405B-Instruct"
+    attempts = 0
+
+    if is_animation:
+        frame_count = len(current_data)
+        while attempts < 3:
+            new_frames = []
+            success = True
+            for i, frame in enumerate(current_data):
+                user_msg = (
+                    f"Original frame {i+1}: {frame}\n"
+                    "Optimize this frame. Only 8 integers (0-255), separated by commas."
+                )
+                response = safe_chat_completion(base_model, [
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": user_msg}
+                ], logger=logger, stream=False)
+                if response:
+                    nums = parse_ai_response_to_numbers(response, logger)
+                    if nums:
+                        new_frames.append(nums)
+                    else:
+                        success = False
+                        break
+                else:
+                    success = False
+                    break
+            if success and len(new_frames) == frame_count:
+                return new_frames
+            attempts += 1
+        if logger:
+            logger("Failed to optimize animation. Using fallback.")
+        return simple_symmetrical_animation(frame_count)
+    else:
+        while attempts < 3:
+            user_msg = (
+                f"Original pattern: {current_data}\n"
+                "Optimize it. Only 8 integers, separated by commas."
+            )
+            response = safe_chat_completion(base_model, [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": user_msg}
+            ], logger=logger, stream=False)
+            if response:
+                nums = parse_ai_response_to_numbers(response, logger)
+                if nums:
+                    return nums
+            attempts += 1
+
+        if logger:
+            logger("Failed to optimize pattern. Using fallback.")
+        return simple_symmetrical_pattern()
 
 def send_single_frame(ser, pattern, logger=None, update_preview=None):
     if len(pattern) != 8:
@@ -152,7 +280,6 @@ def send_single_frame(ser, pattern, logger=None, update_preview=None):
             ser.write(bytes([byte]))
         ser.write(bytes([0xFE]))
         ser.flush()
-        time.sleep(0.1)
         start = time.time()
         ack = False
         while not ack and (time.time() - start) < 5:
@@ -192,7 +319,7 @@ class AnimationManager:
             while not self.stop_flag.is_set() and not self.queue.empty():
                 frame = self.queue.get()
                 self.canvas.after(0, lambda f=frame: self._update_frame(f))
-                time.sleep(FRAME_DELAY_MS / 1000)
+                time.sleep(FRAME_DELAY_MS / 1000.0)
         except Exception as e:
             logging.error(f"Animation error: {e}")
         finally:
@@ -215,7 +342,7 @@ def send_animation(ser, frames, logger=None, animator=None):
         return
     if count > MAX_ANIMATION_FRAMES:
         if logger:
-            logger(f"Frames exceed maximum of {MAX_ANIMATION_FRAMES}.")
+            logger(f"Frames exceed max {MAX_ANIMATION_FRAMES}.")
         return
     try:
         ser.write(bytes([0xFA]))
@@ -227,7 +354,6 @@ def send_animation(ser, frames, logger=None, animator=None):
                 ser.write(bytes([byte]))
         ser.write(bytes([0xFB]))
         ser.flush()
-        time.sleep(0.1)
         start = time.time()
         ack = False
         while not ack and (time.time() - start) < 5:
@@ -295,6 +421,24 @@ def load_saved(file_path):
     with open(file_path, 'r') as f:
         return json.load(f)
 
+def mirror_pattern_horizontal(pattern):
+    new_pattern = []
+    for row_val in pattern:
+        bits = bin(row_val)[2:].zfill(8)
+        reversed_bits = bits[::-1]
+        new_val = int(reversed_bits, 2)
+        new_pattern.append(new_val)
+    return new_pattern
+
+def mirror_pattern_vertical(pattern):
+    return pattern[::-1]
+
+def mirror_animation_horizontal(animation_frames):
+    return [mirror_pattern_horizontal(frame) for frame in animation_frames]
+
+def mirror_animation_vertical(animation_frames):
+    return [frame for frame in reversed(animation_frames)]
+
 class LEDMatrixApp:
     def __init__(self, master):
         self.master = master
@@ -302,7 +446,6 @@ class LEDMatrixApp:
         master.geometry("1300x1000")
         master.configure(bg="#121212")
 
-        # Fonts
         self.title_font = tkfont.Font(family="Helvetica", size=16, weight="bold")
         self.label_font = tkfont.Font(family="Helvetica", size=12)
         self.button_font = tkfont.Font(family="Helvetica", size=12, weight="bold")
@@ -322,6 +465,9 @@ class LEDMatrixApp:
         self.anim_manager = AnimationManager(self.canvas, self.update_leds)
 
         self.current_file = None
+        self.current_pattern = None
+        self.current_animation = None
+        self.is_animation = False
 
     def create_ui(self):
         frame = ttk.Frame(self.master, padding="20 20 20 20")
@@ -350,7 +496,6 @@ class LEDMatrixApp:
                         borderwidth=2,
                         relief="groove")
 
-        # Description Entry
         desc_label = ttk.Label(frame, text="Pattern Description:")
         desc_label.grid(row=0, column=0, padx=(0, 10), pady=(0, 5), sticky='w')
 
@@ -358,7 +503,6 @@ class LEDMatrixApp:
         self.desc_entry.grid(row=0, column=1, padx=(0, 0), pady=(0, 5), sticky='w')
         self.desc_entry.focus()
 
-        # Buttons
         btn_frame = ttk.Frame(frame)
         btn_frame.grid(row=1, column=0, columnspan=2, pady=(10, 10), sticky='w')
 
@@ -380,19 +524,19 @@ class LEDMatrixApp:
         self.publish_btn = ttk.Button(btn_frame, text="Publish", command=self.publish_current, state='disabled')
         self.publish_btn.grid(row=0, column=4, padx=(0, 20), pady=5, sticky='w')
 
-        exit_btn = ttk.Button(btn_frame, text="Exit", command=self.exit_app)
-        exit_btn.grid(row=0, column=5, padx=(100, 0), pady=5, sticky='e')
+        self.optimize_btn = ttk.Button(btn_frame, text="Optimize with AI", command=self.optimize_current, state='disabled')
+        self.optimize_btn.grid(row=0, column=5, padx=(0,20), pady=5, sticky='w')
 
-        # Tooltips
+        exit_btn = ttk.Button(btn_frame, text="Exit", command=self.exit_app)
+        exit_btn.grid(row=0, column=6, padx=(100, 0), pady=5, sticky='e')
+
         self.add_tooltips()
 
-        # Keyboard Shortcuts
         self.master.bind('<Control-g>', lambda e: self.gen_single())
         self.master.bind('<Control-a>', lambda e: self.gen_animation())
         self.master.bind('<Control-l>', lambda e: self.load_ui())
         self.master.bind('<Control-e>', lambda e: self.exit_app())
 
-        # Log Area
         log_label = ttk.Label(frame, text="Logs:")
         log_label.grid(row=2, column=0, padx=(0, 10), pady=(10, 5), sticky='w')
 
@@ -401,21 +545,15 @@ class LEDMatrixApp:
         frame.rowconfigure(3, weight=1)
         frame.columnconfigure(1, weight=1)
 
-        # Input Validation
         self.desc_entry.bind('<KeyRelease>', self.toggle_buttons)
-
-        # Store patterns
-        self.current_pattern = None
-        self.current_animation = None
-        self.is_animation = False
 
     def add_tooltips(self):
         Tooltip(self.gen_single_btn, "Generate and send a single LED pattern based on the description.")
-        Tooltip(self.gen_anim_btn, "Generate and send an animation with multiple LED patterns based on the description.")
-        Tooltip(self.load_btn, "Load a saved pattern or animation to display on the LED matrix.")
+        Tooltip(self.gen_anim_btn, "Generate and send an animation with multiple LED frames.")
+        Tooltip(self.load_btn, "Load a saved pattern or animation.")
         Tooltip(self.edit_btn, "Edit the current pattern or animation.")
         Tooltip(self.publish_btn, "Publish the edited pattern or animation to the Arduino.")
-        Tooltip(self.master, "Close the application.")
+        Tooltip(self.optimize_btn, "Use AI to optimize the current pattern or animation.")
 
     def create_led_preview(self):
         preview_frame = ttk.LabelFrame(self.master, text="LED Matrix Preview", padding="10 10 10 10")
@@ -477,13 +615,16 @@ class LEDMatrixApp:
         threading.Thread(target=self.generate_single_pattern, args=(desc,), daemon=True).start()
 
     def generate_single_pattern(self, desc):
-        pattern = generate_patterns(desc, animation=False, logger=self.log)
+        pattern = generate_patterns(desc, animation=False, logger=self.log, optimize=False)
+        self.current_pattern = pattern.copy()
+        self.current_animation = None
+        self.is_animation = False
+        self.current_file = None
+
+        self.update_leds(pattern, animation=False)
+
         if pattern:
             self.log(f"Pattern: {pattern}", "success")
-            self.current_pattern = pattern.copy()
-            self.current_animation = None
-            self.is_animation = False
-            self.current_file = None
             save = messagebox.askyesno("Save Pattern", "Save this pattern?")
             if save:
                 filename = clean_filename(desc) + '.json'
@@ -493,10 +634,12 @@ class LEDMatrixApp:
                     self.current_file = saved
                 else:
                     self.log(f"Failed to save '{filename}'.", "error")
+
             send_single_frame(self.serial_conn, pattern, logger=self.log, update_preview=self.update_leds)
             self.log("Pattern sent.", "success")
             self.publish_btn.configure(state='normal')
             self.edit_btn.configure(state='normal')
+            self.optimize_btn.configure(state='normal')
         else:
             self.log("Failed to generate pattern.", "error")
         self.enable_buttons()
@@ -511,13 +654,16 @@ class LEDMatrixApp:
         threading.Thread(target=self.generate_animation_patterns, args=(desc,), daemon=True).start()
 
     def generate_animation_patterns(self, desc):
-        frames = generate_patterns(desc, animation=True, frame_count=5, logger=self.log)
+        frames = generate_patterns(desc, animation=True, frame_count=5, logger=self.log, optimize=False)
+        self.current_animation = [f.copy() for f in frames] if frames else None
+        self.current_pattern = None
+        self.is_animation = True if frames else False
+        self.current_file = None
+
         if frames:
             self.log(f"Generated {len(frames)} frames.", "success")
-            self.current_animation = [f.copy() for f in frames]
-            self.current_pattern = None
-            self.is_animation = True
-            self.current_file = None
+            self.anim_manager.start(frames)
+
             save = messagebox.askyesno("Save Animation", "Save this animation?")
             if save:
                 filename = clean_filename(desc) + '.json'
@@ -527,13 +673,41 @@ class LEDMatrixApp:
                     self.current_file = saved
                 else:
                     self.log(f"Failed to save '{filename}'.", "error")
+
             send_animation(self.serial_conn, frames, logger=self.log, animator=self.anim_manager)
             self.log("Animation sent.", "success")
             self.publish_btn.configure(state='normal')
             self.edit_btn.configure(state='normal')
+            self.optimize_btn.configure(state='normal')
         else:
             self.log("Failed to generate animation.", "error")
         self.enable_buttons()
+
+    def optimize_current(self):
+        if not self.current_pattern and not self.current_animation:
+            self.log("No pattern or animation to optimize.", "error")
+            return
+        self.disable_all_buttons()
+        self.log("Optimizing current pattern/animation with AI...", "info")
+
+        def do_optimize():
+            if self.is_animation and self.current_animation:
+                optimized = optimize_with_ai(self.current_animation, is_animation=True, logger=self.log)
+                self.current_animation = optimized
+                self.log("Pattern optimized.", "success")
+                send_animation(self.serial_conn, self.current_animation, logger=self.log, animator=self.anim_manager)
+            elif self.current_pattern:
+                optimized = optimize_with_ai(self.current_pattern, is_animation=False, logger=self.log)
+                self.current_pattern = optimized
+                self.log("Pattern optimized.", "success")
+                send_single_frame(self.serial_conn, self.current_pattern, logger=self.log, update_preview=self.update_leds)
+
+            self.publish_btn.configure(state='normal')
+            self.edit_btn.configure(state='normal')
+            self.optimize_btn.configure(state='normal')
+            self.enable_buttons()
+
+        threading.Thread(target=do_optimize, daemon=True).start()
 
     def disable_all_buttons(self):
         self.gen_single_btn.configure(state='disabled')
@@ -541,6 +715,7 @@ class LEDMatrixApp:
         self.load_btn.configure(state='disabled')
         self.edit_btn.configure(state='disabled')
         self.publish_btn.configure(state='disabled')
+        self.optimize_btn.configure(state='disabled')
 
     def enable_buttons(self):
         text = self.desc_entry.get().strip()
@@ -564,7 +739,6 @@ class LEDMatrixApp:
         anims_frame = ttk.LabelFrame(frame, text="Saved Animations", padding="10 10 10 10")
         anims_frame.pack(side='right', fill='both', expand=True, padx=(10, 0))
 
-        # Patterns Listbox
         p_list_frame = ttk.Frame(patterns_frame)
         p_list_frame.pack(fill='both', expand=True)
         p_scroll = ttk.Scrollbar(p_list_frame, orient='vertical')
@@ -573,7 +747,6 @@ class LEDMatrixApp:
         p_scroll.pack(side='right', fill='y')
         p_list.pack(side='left', fill='both', expand=True)
 
-        # Animations Listbox
         a_list_frame = ttk.Frame(anims_frame)
         a_list_frame.pack(fill='both', expand=True)
         a_scroll = ttk.Scrollbar(a_list_frame, orient='vertical')
@@ -582,7 +755,6 @@ class LEDMatrixApp:
         a_scroll.pack(side='right', fill='y')
         a_list.pack(side='left', fill='both', expand=True)
 
-        # Populate Listboxes
         saved_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "saved_patterns")
         os.makedirs(saved_dir, exist_ok=True)
         files = [f for f in os.listdir(saved_dir) if f.endswith('.json')]
@@ -602,17 +774,14 @@ class LEDMatrixApp:
             load_window.destroy()
             return
 
-        # Preview Area
         preview = ttk.LabelFrame(frame, text="Preview Area", padding="10 10 10 10")
         preview.pack(fill='both', expand=False, padx=(0, 0), pady=(10, 0))
         preview_label = ttk.Label(preview, text="Preview Coming Soon", anchor='center', font=self.label_font)
         preview_label.pack(expand=True, fill='both')
 
-        # Bind selection
         p_list.bind('<<ListboxSelect>>', lambda e: self.preview_selection(p_list, 'single'))
         a_list.bind('<<ListboxSelect>>', lambda e: self.preview_selection(a_list, 'animation'))
 
-        # Load Buttons
         load_p_btn = ttk.Button(patterns_frame, text="Load Pattern", command=lambda: self.load_file(p_list, 'single', load_window))
         load_p_btn.pack(pady=(10, 0))
 
@@ -639,6 +808,7 @@ class LEDMatrixApp:
                 self.update_leds(pattern, animation=False)
                 self.edit_btn.configure(state='normal')
                 self.publish_btn.configure(state='normal')
+                self.optimize_btn.configure(state='normal')
             elif file_type == 'animation':
                 frames = data.get('patterns')
                 self.current_animation = [f.copy() for f in frames]
@@ -648,6 +818,7 @@ class LEDMatrixApp:
                 self.anim_manager.start(frames)
                 self.edit_btn.configure(state='normal')
                 self.publish_btn.configure(state='normal')
+                self.optimize_btn.configure(state='normal')
         except:
             self.log(f"Failed to load '{filename}'.", "error")
 
@@ -670,8 +841,6 @@ class LEDMatrixApp:
                 self.is_animation = False
                 self.current_file = path
                 self.update_leds(pattern, animation=False)
-                self.edit_btn.configure(state='normal')
-                self.publish_btn.configure(state='normal')
             elif file_type == 'animation':
                 frames = data.get('patterns')
                 self.current_animation = [f.copy() for f in frames]
@@ -679,8 +848,9 @@ class LEDMatrixApp:
                 self.is_animation = True
                 self.current_file = path
                 self.anim_manager.start(frames)
-                self.edit_btn.configure(state='normal')
-                self.publish_btn.configure(state='normal')
+            self.edit_btn.configure(state='normal')
+            self.publish_btn.configure(state='normal')
+            self.optimize_btn.configure(state='normal')
             window.destroy()
         except:
             self.log(f"Failed to load '{filename}'.", "error")
@@ -692,9 +862,13 @@ class LEDMatrixApp:
             self.edit_pattern()
 
     def edit_pattern(self):
+        if not self.current_pattern:
+            self.log("No pattern to edit.", "error")
+            return
+
         edit_win = tk.Toplevel(self.master)
         edit_win.title("Edit Pattern")
-        edit_win.geometry("400x400")
+        edit_win.geometry("500x500")
         edit_win.resizable(False, False)
 
         canvas = tk.Canvas(edit_win, width=LED_DIAMETER * 8 + LED_SPACING * 9,
@@ -732,12 +906,54 @@ class LEDMatrixApp:
 
         canvas.bind("<Button-1>", toggle_led)
 
+        btn_frame = ttk.Frame(edit_win)
+        btn_frame.pack(pady=10)
+
+        def redraw_pattern():
+            for r in range(8):
+                bits = bin(self.current_pattern[r])[2:].zfill(8)
+                for c, bit in enumerate(bits):
+                    color = ACTIVE_COLOR if bit == '1' else INACTIVE_COLOR
+                    canvas.itemconfig(circles[r][c], fill=color)
+
+        def mirror_h():
+            self.current_pattern = mirror_pattern_horizontal(self.current_pattern)
+            redraw_pattern()
+
+        def mirror_v():
+            self.current_pattern = mirror_pattern_vertical(self.current_pattern)
+            redraw_pattern()
+
+        mirror_h_btn = ttk.Button(btn_frame, text="Mirror Horizontal", command=mirror_h)
+        mirror_h_btn.grid(row=0, column=0, padx=5)
+
+        mirror_v_btn = ttk.Button(btn_frame, text="Mirror Vertical", command=mirror_v)
+        mirror_v_btn.grid(row=0, column=1, padx=5)
+
         save_btn = ttk.Button(edit_win, text="Save", command=lambda: self.save_edited_pattern(edit_win))
         save_btn.pack(pady=10)
 
     def save_edited_pattern(self, window):
         send_single_frame(self.serial_conn, self.current_pattern, logger=self.log, update_preview=self.update_leds)
         self.log("Edited pattern sent.", "success")
+        if self.current_file and self.current_pattern:
+            data = {'type': 'single', 'pattern': self.current_pattern}
+            try:
+                with open(self.current_file, 'w') as f:
+                    json.dump(data, f, indent=4)
+                self.log(f"Pattern saved to '{os.path.basename(self.current_file)}'.", "success")
+            except:
+                self.log("Failed to save edited pattern.", "error")
+        else:
+            save = messagebox.askyesno("Save Edited Pattern", "Save the edited pattern?")
+            if save:
+                filename = clean_filename("edited_pattern") + '.json'
+                saved = save_single_pattern(self.current_pattern, name=filename)
+                if saved:
+                    self.log(f"Edited pattern saved as '{filename}'.", "success")
+                    self.current_file = saved
+                else:
+                    self.log("Failed to save edited pattern.", "error")
         window.destroy()
 
     def edit_animation(self):
@@ -767,13 +983,13 @@ class LEDMatrixApp:
         circles = []
         for row in range(8):
             row_circles = []
-            for col in range(8):
+            bits = bin(self.current_animation[0][row])[2:].zfill(8)
+            for col, bit in enumerate(bits):
                 x1 = LED_SPACING + col * (LED_DIAMETER + LED_SPACING)
                 y1 = LED_SPACING + row * (LED_DIAMETER + LED_SPACING)
                 x2 = x1 + LED_DIAMETER
                 y2 = y1 + LED_DIAMETER
-                bit = self.current_animation[0][row] & (1 << (7 - col))
-                color = ACTIVE_COLOR if bit else INACTIVE_COLOR
+                color = ACTIVE_COLOR if bit == '1' else INACTIVE_COLOR
                 circle = canvas.create_oval(x1, y1, x2, y2, fill=color, outline="")
                 row_circles.append(circle)
             circles.append(row_circles)
@@ -804,12 +1020,51 @@ class LEDMatrixApp:
 
         canvas.bind("<Button-1>", toggle_led)
 
+        btn_frame = ttk.Frame(edit_win)
+        btn_frame.pack(pady=10)
+
+        def mirror_h():
+            self.current_animation = mirror_animation_horizontal(self.current_animation)
+            update_canvas(frame_var.get())
+
+        def mirror_v():
+            self.current_animation = mirror_animation_vertical(self.current_animation)
+            update_canvas(frame_var.get())
+
+        mirror_h_btn = ttk.Button(btn_frame, text="Mirror Horizontal", command=mirror_h)
+        mirror_h_btn.grid(row=0, column=0, padx=5)
+
+        mirror_v_btn = ttk.Button(btn_frame, text="Mirror Vertical", command=mirror_v)
+        mirror_v_btn.grid(row=0, column=1, padx=5)
+
         save_btn = ttk.Button(edit_win, text="Save", command=lambda: self.save_edited_animation(edit_win))
         save_btn.pack(pady=10)
+
+        def update_canvas_on_init():
+            update_canvas(0)
+        update_canvas_on_init()
 
     def save_edited_animation(self, window):
         send_animation(self.serial_conn, self.current_animation, logger=self.log, animator=self.anim_manager)
         self.log("Edited animation sent.", "success")
+        if self.current_file and self.current_animation:
+            data = {'type': 'animation', 'patterns': self.current_animation}
+            try:
+                with open(self.current_file, 'w') as f:
+                    json.dump(data, f, indent=4)
+                self.log(f"Animation saved to '{os.path.basename(self.current_file)}'.", "success")
+            except:
+                self.log("Failed to save edited animation.", "error")
+        else:
+            save = messagebox.askyesno("Save Edited Animation", "Save the edited animation?")
+            if save:
+                filename = clean_filename("edited_animation") + '.json'
+                saved = save_animation_frames(self.current_animation, name=filename)
+                if saved:
+                    self.log(f"Edited animation saved as '{filename}'.", "success")
+                    self.current_file = saved
+                else:
+                    self.log("Failed to save edited animation.", "error")
         window.destroy()
 
     def publish_current(self):
