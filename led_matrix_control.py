@@ -391,7 +391,8 @@ def save_single_pattern(pattern, name=None, overwrite=False):
         with open(path, 'w') as f:
             json.dump(data, f, indent=4)
         return path
-    except:
+    except Exception as e:
+        logging.error(f"Error saving single pattern: {e}")
         return None
 
 def save_animation_frames(frames, name=None, overwrite=False):
@@ -414,7 +415,8 @@ def save_animation_frames(frames, name=None, overwrite=False):
         with open(path, 'w') as f:
             json.dump(data, f, indent=4)
         return path
-    except:
+    except Exception as e:
+        logging.error(f"Error saving animation: {e}")
         return None
 
 def load_saved(file_path):
@@ -516,7 +518,7 @@ class LEDMatrixApp:
 
         self.load_btn = ttk.Button(btn_frame, text="Load Pattern/Animation", command=self.load_ui)
         self.load_btn.grid(row=0, column=2, padx=(0, 20), pady=5, sticky='w')
-        self.load_btn.configure(state='disabled')
+        self.load_btn.configure(state='normal')  # Always enable Load button
 
         self.edit_btn = ttk.Button(btn_frame, text="Edit", command=self.edit_current, state='disabled')
         self.edit_btn.grid(row=0, column=3, padx=(0, 20), pady=5, sticky='w')
@@ -589,7 +591,7 @@ class LEDMatrixApp:
         state = 'normal' if text else 'disabled'
         self.gen_single_btn.configure(state=state)
         self.gen_anim_btn.configure(state=state)
-        self.load_btn.configure(state=state)
+        # Removed load_btn from being controlled by description entry
 
     def log(self, msg, level="info"):
         self.log_area.config(state='normal')
@@ -712,17 +714,19 @@ class LEDMatrixApp:
     def disable_all_buttons(self):
         self.gen_single_btn.configure(state='disabled')
         self.gen_anim_btn.configure(state='disabled')
-        self.load_btn.configure(state='disabled')
+        self.load_btn.configure(state='normal')  # Load button remains enabled
         self.edit_btn.configure(state='disabled')
         self.publish_btn.configure(state='disabled')
         self.optimize_btn.configure(state='disabled')
 
     def enable_buttons(self):
+        # Only enable Generate buttons if description is present
         text = self.desc_entry.get().strip()
         state = 'normal' if text else 'disabled'
         self.gen_single_btn.configure(state=state)
         self.gen_anim_btn.configure(state=state)
-        self.load_btn.configure(state=state)
+        # Load button remains enabled
+        # Edit, Publish, Optimize buttons are managed elsewhere
 
     def load_ui(self):
         load_window = tk.Toplevel(self.master)
@@ -766,7 +770,8 @@ class LEDMatrixApp:
                     p_list.insert(tk.END, f)
                 elif data.get('type') == 'animation':
                     a_list.insert(tk.END, f)
-            except:
+            except Exception as e:
+                logging.error(f"Error loading file '{f}': {e}")
                 continue
 
         if not files:
@@ -819,8 +824,8 @@ class LEDMatrixApp:
                 self.edit_btn.configure(state='normal')
                 self.publish_btn.configure(state='normal')
                 self.optimize_btn.configure(state='normal')
-        except:
-            self.log(f"Failed to load '{filename}'.", "error")
+        except Exception as e:
+            self.log(f"Failed to load '{filename}': {e}", "error")
 
     def load_file(self, listbox, file_type, window):
         selected = listbox.curselection()
@@ -852,8 +857,8 @@ class LEDMatrixApp:
             self.publish_btn.configure(state='normal')
             self.optimize_btn.configure(state='normal')
             window.destroy()
-        except:
-            self.log(f"Failed to load '{filename}'.", "error")
+        except Exception as e:
+            self.log(f"Failed to load '{filename}': {e}", "error")
 
     def edit_current(self):
         if self.is_animation:
@@ -942,8 +947,8 @@ class LEDMatrixApp:
                 with open(self.current_file, 'w') as f:
                     json.dump(data, f, indent=4)
                 self.log(f"Pattern saved to '{os.path.basename(self.current_file)}'.", "success")
-            except:
-                self.log("Failed to save edited pattern.", "error")
+            except Exception as e:
+                self.log(f"Failed to save edited pattern: {e}", "error")
         else:
             save = messagebox.askyesno("Save Edited Pattern", "Save the edited pattern?")
             if save:
@@ -1053,8 +1058,8 @@ class LEDMatrixApp:
                 with open(self.current_file, 'w') as f:
                     json.dump(data, f, indent=4)
                 self.log(f"Animation saved to '{os.path.basename(self.current_file)}'.", "success")
-            except:
-                self.log("Failed to save edited animation.", "error")
+            except Exception as e:
+                self.log(f"Failed to save animation: {e}", "error")
         else:
             save = messagebox.askyesno("Save Edited Animation", "Save the edited animation?")
             if save:
@@ -1077,8 +1082,8 @@ class LEDMatrixApp:
                 with open(self.current_file, 'w') as f:
                     json.dump(data, f, indent=4)
                 self.log(f"Animation saved to '{os.path.basename(self.current_file)}'.", "success")
-            except:
-                self.log("Failed to save animation.", "error")
+            except Exception as e:
+                self.log(f"Failed to save animation: {e}", "error")
                 return
             send_animation(self.serial_conn, self.current_animation, logger=self.log, animator=self.anim_manager)
             self.log("Animation published.", "success")
@@ -1088,8 +1093,8 @@ class LEDMatrixApp:
                 with open(self.current_file, 'w') as f:
                     json.dump(data, f, indent=4)
                 self.log(f"Pattern saved to '{os.path.basename(self.current_file)}'.", "success")
-            except:
-                self.log("Failed to save pattern.", "error")
+            except Exception as e:
+                self.log(f"Failed to save pattern: {e}", "error")
                 return
             send_single_frame(self.serial_conn, self.current_pattern, logger=self.log, update_preview=self.update_leds)
             self.log("Pattern published.", "success")
