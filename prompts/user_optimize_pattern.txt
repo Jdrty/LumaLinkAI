@@ -1,0 +1,3 @@
+Optimize the following 8x8 LED matrix pattern to enhance symmetry and visual clarity without altering the intended design:
+
+Pattern: {pattern}

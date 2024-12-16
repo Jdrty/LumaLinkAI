@@ -1,0 +1,9 @@
+Refine the following 8x8 LED matrix pattern based on the evaluation feedback provided:
+
+Original Pattern: {pattern}
+
+Evaluation Feedback: "{feedback}"
+
+Provide an improved pattern that addresses the issues mentioned in the feedback while maintaining the original design intent.
+
+The output should be a list of 8 integers separated by commas, with no additional text or explanation.

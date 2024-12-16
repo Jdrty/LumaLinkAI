@@ -1,0 +1,8 @@
+Generate an animation for an 8x8 LED matrix based on the following description:
+
+Description: "{prompt}" (Frame {frame_number})
+
+Please ensure that each frame transitions smoothly to the next, maintaining the integrity of the described animation. Refer to the example patterns for guidance.
+
+- Example Description for a Blinking Heart: "Create a blinking heart animation." (Frame 1), "Create a blinking heart animation." (Frame 2), etc.
+- Example Description for a Moving Star: "Create a moving star animation." (Frame 1), "Create a moving star animation." (Frame 2), etc.

@@ -1,0 +1,8 @@
+Generate an 8x8 LED matrix pattern based on the following description:
+
+Description: "{prompt}"
+
+Please ensure the pattern clearly represents the described shape. Refer to the example patterns for guidance.
+
+- Example Description for a Heart: "Create a symmetrical heart shape centered on the matrix."
+- Example Description for a Star: "Design a five-pointed star centered on the matrix."

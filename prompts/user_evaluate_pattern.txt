@@ -1,0 +1,5 @@
+Evaluate the following 8x8 LED matrix pattern based on the description provided:
+
+Description: "{prompt}"
+
+Pattern: {pattern}
