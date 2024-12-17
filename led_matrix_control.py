@@ -20,7 +20,7 @@ INACTIVE_COLOR = "#330000"
 FRAME_DELAY_MS = 100
 MAX_ANIMATION_FRAMES = 10
 SAVED_PATTERNS_DIR = "saved_patterns"
-USE_MOCK_SERIAL = False
+USE_MOCK_SERIAL = True
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROMPTS_DIR = os.path.join(SCRIPT_DIR, "prompts")
 load_dotenv()
