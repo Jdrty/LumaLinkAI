@@ -1,5 +1,8 @@
-Evaluate the following 8x8 LED matrix pattern based on the description provided:
+Evaluate the following 8x8 LED matrix pattern based on the description:
 
 Description: "{prompt}"
 
-Pattern: {pattern}
+Pattern:
+{pattern}
+
+Give a Score: X/10 and brief explanation of strengths and weaknesses.

@@ -1,5 +1,5 @@
-Optimize the following frame {frame_number} of the 8x8 LED matrix animation to enhance symmetry and visual clarity without altering the intended design:
+Optimize the following frame {frame_number} of an 8x8 LED animation:
 
 Original Frame {frame_number}: {frame_data}
 
-Ensure that the optimized frame transitions smoothly to the next frame in the animation.
+Output 8 lines of Bxxxxxxxx, enhancing the frame's clarity and symmetry while preserving the design intent.

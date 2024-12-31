@@ -1,177 +1,122 @@
-#include <Arduino.h> // Used to run Arduino code outside of Arduino IDE
+#include <Arduino.h>
 
-// Pin Definitions
-#define SHIFT_DATA 8   // A0
-#define SHIFT_CLOCK 7  // A1
-#define SHIFT_LATCH 6  // A2
-
-// Matrix Dimensions
+#define SHIFT_DATA 8
+#define SHIFT_CLOCK 7
+#define SHIFT_LATCH 6
 #define NUM_ROWS 8
-#define NUM_COLS 8
-#define MAX_FRAMES 10  // Maximum number of animation frames
+#define MAX_FRAMES 10
 
-// Markers
 #define START_SINGLE_FRAME 0xFF
 #define END_SINGLE_FRAME 0xFE
 #define START_ANIMATION 0xFA
 #define END_ANIMATION 0xFB
 
-// Image Data (Single Frame)
-uint8_t image[NUM_ROWS] = {0, 0, 0, 0, 0, 0, 0, 0};
-
-// Animation Data
-uint8_t animationFrames = 0;
-uint8_t currentFrame = 0;
+uint8_t image[NUM_ROWS]={0,0,0,0,0,0,0,0};
 uint8_t animationData[MAX_FRAMES][NUM_ROWS];
-bool animationReceived = false;
+uint8_t currentDisplay[NUM_ROWS]={0,0,0,0,0,0,0,0};
+uint8_t animationFrames=0;
+uint8_t currentFrame=0;
+bool animationActive=false;
 
-// Function to update the shift registers for a single row
-void singleRow(uint8_t row, uint8_t columns) {
-  digitalWrite(SHIFT_LATCH, LOW);
-  shiftOut(SHIFT_DATA, SHIFT_CLOCK, LSBFIRST, columns);     // Set columns
-  shiftOut(SHIFT_DATA, SHIFT_CLOCK, MSBFIRST, 1 << row);    // Set row
-  digitalWrite(SHIFT_LATCH, HIGH);
+unsigned long lastRowMillis=0;
+unsigned long rowInterval=0; 
+uint8_t currentRow=0;
+
+unsigned long lastFrameChange=0;
+unsigned long frameInterval=500; // half second per frame
+
+void shiftBoth(uint8_t r, uint8_t c){
+  digitalWrite(SHIFT_LATCH,LOW);
+  shiftOut(SHIFT_DATA, SHIFT_CLOCK,LSBFIRST,c);
+  shiftOut(SHIFT_DATA, SHIFT_CLOCK,MSBFIRST,r);
+  digitalWrite(SHIFT_LATCH,HIGH);
 }
-
-// Function to display a single frame
-void displayFrame(uint8_t frame[]) {
-  for (uint8_t i = 0; i < NUM_ROWS; i++) {
-    singleRow(i, frame[i]); // Display each row with its corresponding pattern
-    delay(1); // Short delay for persistence of vision
-  }
+void scanRow(){
+  shiftBoth(1<<currentRow,currentDisplay[currentRow]);
+  delayMicroseconds(200);
+  shiftBoth(0,0);
+  currentRow++;
+  if(currentRow>=NUM_ROWS)currentRow=0;
 }
-
-// Function to display the entire image (static)
-void displayImage() {
-  displayFrame(image);
+void clearAnim(){
+  animationFrames=0;
+  currentFrame=0;
+  animationActive=false;
 }
-
-// Function to display animation frames
-void displayAnimation() {
-  if (animationReceived && animationFrames > 0) {
-    displayFrame(animationData[currentFrame]);
-    currentFrame = (currentFrame + 1) % animationFrames;
-    delay(100); // Delay between frames (adjust as needed)
-  }
-}
-
-// Function to clear animation data
-void clearAnimation() {
-  animationFrames = 0;
-  currentFrame = 0;
-  animationReceived = false;
-}
-
-void setup() {
-  // Initialize Shift Register Pins as Outputs
-  pinMode(SHIFT_DATA, OUTPUT);
-  pinMode(SHIFT_CLOCK, OUTPUT);
-  pinMode(SHIFT_LATCH, OUTPUT);
-
-  // Initialize Shift Registers to a known state (All LEDs off)
-  digitalWrite(SHIFT_LATCH, LOW);
-  shiftOut(SHIFT_DATA, SHIFT_CLOCK, MSBFIRST, 0x00); // Columns off
-  shiftOut(SHIFT_DATA, SHIFT_CLOCK, MSBFIRST, 0x00); // Rows off
-  digitalWrite(SHIFT_LATCH, HIGH);
-
-  // Initialize Serial Communication
+void setup(){
+  pinMode(SHIFT_DATA,OUTPUT);
+  pinMode(SHIFT_CLOCK,OUTPUT);
+  pinMode(SHIFT_LATCH,OUTPUT);
+  digitalWrite(SHIFT_LATCH,LOW);
+  shiftOut(SHIFT_DATA, SHIFT_CLOCK,MSBFIRST,0x00);
+  shiftOut(SHIFT_DATA, SHIFT_CLOCK,MSBFIRST,0x00);
+  digitalWrite(SHIFT_LATCH,HIGH);
   Serial.begin(9600);
-  while (!Serial) {
-    ; // Wait for serial port to connect. Needed for native USB
+  while(!Serial){}
+  for(int i=0;i<NUM_ROWS;i++){
+    currentDisplay[i]=image[i];
   }
-  Serial.println("Arduino ready to receive patterns.");
 }
-
-void loop() {
-  // Check if data is available on the serial port
-  if (Serial.available() > 0) {
-    byte startMarker = Serial.read();
-    Serial.print("Start marker received: 0x");
-    Serial.println(startMarker, HEX);
-    
-    if (startMarker == START_SINGLE_FRAME) {
-      // Handle single frame
-      byte receivedPattern[NUM_ROWS];
-      bool valid = true;
-
-      for (int i = 0; i < NUM_ROWS; i++) {
-        while (Serial.available() == 0) { /* Wait */ }
-        receivedPattern[i] = Serial.read();
-        Serial.print("Frame ");
-        Serial.print(i + 1);
-        Serial.print(" byte received: 0x");
-        Serial.println(receivedPattern[i], HEX);
+void loop(){
+  if(Serial.available()>0){
+    byte startMarker=Serial.read();
+    if(startMarker==START_SINGLE_FRAME){
+      uint8_t tmp[NUM_ROWS];
+      bool valid=true;
+      for(int i=0;i<NUM_ROWS;i++){
+        while(Serial.available()==0){}
+        tmp[i]=Serial.read();
       }
-
-      while (Serial.available() == 0) { /* Wait */ }
-      byte endMarker = Serial.read();
-      Serial.print("End marker received: 0x");
-      Serial.println(endMarker, HEX);
-      
-      if (endMarker != END_SINGLE_FRAME) {
-        Serial.println("Invalid end marker received for single frame.");
-        valid = false;
-      }
-
-      if (valid) {
-        // Update the image array
-        for (int i = 0; i < NUM_ROWS; i++) {
-          image[i] = receivedPattern[i];
+      while(Serial.available()==0){}
+      byte endMarker=Serial.read();
+      if(endMarker!=END_SINGLE_FRAME)valid=false;
+      if(valid){
+        for(int i=0;i<NUM_ROWS;i++){
+          image[i]=tmp[i];
+          currentDisplay[i]=tmp[i];
         }
+        animationActive=false;
         Serial.println("Pattern received.");
       }
-    }
-    else if (startMarker == START_ANIMATION) {
-      // Handle animation
-      while (Serial.available() == 0) { /* Wait */ }
-      byte num_frames = Serial.read();
-      Serial.print("Number of frames received: ");
-      Serial.println(num_frames);
-
-      if (num_frames == 0 || num_frames > MAX_FRAMES) {
-        Serial.println("Invalid number of frames.");
-        clearAnimation();
-      }
-      else {
-        animationFrames = num_frames;
-        for (byte f = 0; f < animationFrames; f++) {
-          for (int j = 0; j < NUM_ROWS; j++) {
-            while (Serial.available() == 0) { /* Wait */ }
-            animationData[f][j] = Serial.read();
-            Serial.print("Frame ");
-            Serial.print(f + 1);
-            Serial.print(", Row ");
-            Serial.print(j + 1);
-            Serial.print(" byte received: 0x");
-            Serial.println(animationData[f][j], HEX);
+    } else if(startMarker==START_ANIMATION){
+      while(Serial.available()==0){}
+      byte nf=Serial.read();
+      if(nf==0||nf>MAX_FRAMES)clearAnim();
+      else{
+        animationFrames=nf;
+        for(byte f=0;f<animationFrames;f++){
+          for(int j=0;j<NUM_ROWS;j++){
+            while(Serial.available()==0){}
+            animationData[f][j]=Serial.read();
           }
         }
-
-        while (Serial.available() == 0) { /* Wait */ }
-        byte endMarker = Serial.read();
-        Serial.print("End marker received: 0x");
-        Serial.println(endMarker, HEX);
-        
-        if (endMarker != END_ANIMATION) {
-          Serial.println("Invalid end marker for animation.");
-          clearAnimation();
-        }
-        else {
-          animationReceived = true;
+        while(Serial.available()==0){}
+        byte endMarker=Serial.read();
+        if(endMarker!=END_ANIMATION)clearAnim();
+        else{
+          animationActive=true;
+          currentFrame=0;
+          for(int row=0;row<NUM_ROWS;row++){
+            currentDisplay[row]=animationData[0][row];
+          }
           Serial.println("Animation received.");
+          lastFrameChange=millis();
         }
       }
     }
-    else {
-      Serial.println("Unknown start marker received.");
+  }
+  unsigned long now=millis();
+  if(now-lastRowMillis>0){
+    lastRowMillis=now;
+    scanRow();
+  }
+  if(animationActive&&animationFrames>0){
+    if(now-lastFrameChange>=frameInterval){
+      lastFrameChange=now;
+      currentFrame=(currentFrame+1)%animationFrames;
+      for(int r=0;r<NUM_ROWS;r++){
+        currentDisplay[r]=animationData[currentFrame][r];
+      }
     }
-  }
-
-  // Display either static image or animation
-  if (animationReceived && animationFrames > 0) {
-    displayAnimation();
-  }
-  else {
-    displayImage();
   }
 }

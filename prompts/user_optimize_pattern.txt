@@ -1,3 +1,5 @@
-Optimize the following 8x8 LED matrix pattern to enhance symmetry and visual clarity without altering the intended design:
+Optimize the following 8x8 LED matrix pattern:
 
 Pattern: {pattern}
+
+Output 8 lines of Bxxxxxxxx, improving visual clarity and symmetry without losing the original design intent.
