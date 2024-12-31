@@ -13,7 +13,7 @@ def main():
     except Exception as e:
         print("Serial init failed:", e)
         return
-    # Pass logger if you want
+    # Pass logger
     app = LEDMatrixApp(root, conn, logger=simple_logger)
     root.protocol("WM_DELETE_WINDOW", app.exit_app)
     root.mainloop()
