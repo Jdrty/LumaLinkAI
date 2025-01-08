@@ -30,7 +30,7 @@ MAX_ANIMATION_FRAMES = 10
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def clean_filename(name):
-    # Remove invalid characters from filenames
+    # Remove bad characters from filenames
     return re.sub(r'[\\/*?:"<>|]', "", name)
 
 def save_data(data, name=None, overwrite=False):
@@ -121,7 +121,7 @@ class AnimationManager:
 class LEDMatrixApp:
     def __init__(self, master, serial_conn, logger=None):
         self.master = master
-        # Modern-ish background, same style
+        # Modern-ish background (I'm heavily limited by Tkinter)
         self.master.title("LED Matrix")
         self.master.configure(bg="#121212")
 
@@ -129,7 +129,7 @@ class LEDMatrixApp:
         self.serial_conn = serial_conn
         self.log_fn = logger if logger else self.log
 
-        # Our internal state
+        # Internal state
         self.current_pattern     = None
         self.current_animation   = None
         self.current_file        = None
@@ -143,11 +143,11 @@ class LEDMatrixApp:
         self.create_preview()
         self.anim_manager = AnimationManager(self.canvas, self.update_leds)
 
-        # NEW: Create a simple menu bar with Load and Save As
+        # Create a menu bar with Load and Save As
         self.create_menu()
 
     def create_menu(self):
-        # Create a menu bar for load/save features
+        # Create a menu bar for loading
         menubar = tk.Menu(self.master)
         filemenu = tk.Menu(menubar, tearoff=0)
         filemenu.add_command(label="Load", command=self.load_ui)
@@ -159,7 +159,7 @@ class LEDMatrixApp:
         self.master.config(menu=menubar)
 
     def create_ui(self):
-        # Main container frame
+        # Container frame
         self.main_frame = ttk.Frame(self.master, padding="20")
         self.main_frame.grid(sticky='NSEW')
 
@@ -243,6 +243,7 @@ class LEDMatrixApp:
         self.main_frame.columnconfigure(1, weight=1)
 
     def create_preview(self):
+        # Digital Matrix
         lf = ttk.LabelFrame(self.main_frame, text="Preview", padding="10")
         lf.grid(row=5, column=0, columnspan=2, sticky='n')
 
@@ -276,6 +277,7 @@ class LEDMatrixApp:
         self.log_area.config(state='disabled')
 
     def disable_all_buttons(self):
+        # Button disable config
         for b in (
             self.gen_single_btn, self.gen_anim_btn,
             self.publish_btn, self.edit_btn, self.optimize_btn
@@ -283,6 +285,7 @@ class LEDMatrixApp:
             b.configure(state='disabled')
 
     def enable_buttons(self):
+        # Button enable config
         if self.current_pattern or self.current_animation:
             self.edit_btn.configure(state='normal')
             self.publish_btn.configure(state='normal')
@@ -315,7 +318,7 @@ class LEDMatrixApp:
         threading.Thread(target=self.generate_single_pattern, args=(d,), daemon=True).start()
 
     def generate_single_pattern(self, desc):
-        from ai_utils import generate_patterns, visualize_pattern, is_symmetric
+        from ai_utils import generate_patterns, visualize_pattern, is_symmetric # Import AI utils
         try:
             pat = generate_patterns(desc, logger=self.log)
         except FileNotFoundError as e:
@@ -328,6 +331,7 @@ class LEDMatrixApp:
         self.current_file      = None
         self.refinement_iterations = 0
 
+        # Turn on LEDs from AI
         self.update_leds(pat)
         vis = visualize_pattern(pat)
         self.log(f"Visual Pattern:\n{vis}", "info")
@@ -518,6 +522,7 @@ class LEDMatrixApp:
             self.enable_buttons()
 
     def after_generation(self):
+        # Set button states after generation
         self.publish_btn.configure(state='normal')
         self.edit_btn.configure(state='normal')
         self.optimize_btn.configure(state='normal')
@@ -558,6 +563,7 @@ class LEDMatrixApp:
             self.enable_buttons()
 
     def publish_current(self):
+        # Publish current loaded JSON file
         if not self.current_file:
             self.log("No file loaded to publish","error")
             return
@@ -752,6 +758,7 @@ class LEDMatrixApp:
                     canvas.itemconfig(circles[rr][cc],fill=col)
 
         def mirror_h():
+            # Mirrors current Frame/Animation
             self.current_animation=mirror_animation(self.current_animation,horizontal=True)
             redraw_animation()
         def mirror_v():
