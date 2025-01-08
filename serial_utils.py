@@ -1,14 +1,14 @@
 # serial_utils.py
 
-import os
-import sys
-import glob
-import time
-import threading
-import serial
+import os # Allows Script to Manage Directories in Operating System
+import sys # Allows System Interaction
+import glob # File Pattern Matching
+import time # Time Utils for Delays
+import threading # Concurrency control
+import serial # Allows Script to Access Serial Ports
 
 # Toggle this if you want to test without a real Arduino
-USE_MOCK_SERIAL = False
+USE_MOCK_SERIAL = True
 
 class MockSerial:
     # Initialize the mock serial connection

@@ -1,11 +1,11 @@
 # ui.py
 
-import os, time, re, json, threading
-import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, filedialog
-from tkinter import font as tkfont
+import os, time, re, json, threading # System/Text Systems Import
+import tkinter as tk # Import GUI
+from tkinter import ttk, scrolledtext, messagebox, filedialog # Essential GUI Systems
+from tkinter import font as tkfont # Text Font
 
-from ai_utils import (
+from ai_utils import ( # Various AI Systems Within ai_utils
     generate_patterns,
     optimize_with_ai,
     parse_response,
@@ -16,7 +16,7 @@ from ai_utils import (
     mirror_pattern,
     mirror_animation
 )
-from serial_utils import send_frame, send_animation
+from serial_utils import send_frame, send_animation # Systems to Transfer Data
 
 # Constants
 SAVED_PATTERNS_DIR = "saved_patterns"  # Directory to save patterns and animations
@@ -296,8 +296,6 @@ class LEDMatrixApp:
             for c, b in enumerate(bits):
                 col = ACTIVE_COLOR if b=='1' else INACTIVE_COLOR
                 self.canvas.itemconfig(self.leds[r][c], fill=col)
-
-    # ================ KEEP ALL LOGIC FROM OLD UI ================
 
     def toggle_buttons(self, e=None):
         if self.currently_refining:

@@ -1,10 +1,10 @@
 # ai_utils.py
 
-import os
-import re
-import time
-import openai
-from dotenv import load_dotenv
+import os # Allows Script to Manage Directories in Operating System
+import re # Regex operations
+import time # Timing Control
+import openai # For AI API Key Usage
+from dotenv import load_dotenv # To Safely Secure GLHF API Key
 
 # Define directories for loading prompt files
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -130,7 +130,7 @@ def optimize_with_ai(data, is_animation=False, logger=None):
                 frame_data=",".join(str(b) for b in frame)
             )
             response = safe_chat_completion(model, [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": system_prompt}, # Model Config
                 {"role": "user", "content": user_prompt}
             ], logger=logger)
             if response:

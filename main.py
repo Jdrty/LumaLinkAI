@@ -1,8 +1,8 @@
 # main.py
 
-import tkinter as tk
-from serial_utils import init_serial
-from ui import LEDMatrixApp
+import tkinter as tk # Loading GUI
+from serial_utils import init_serial # Loading Serial
+from ui import LEDMatrixApp # Loads App
 
 def simple_logger(msg, lv="info"):
     # Logs messages to the console with the specified level
