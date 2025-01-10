@@ -1,4 +1,4 @@
-#include <Arduino.h>
+#include <Arduino.h> // This is because I'm not in the arduino IDE, IGNORE
 
 // Pin definitions for shift register
 #define SHIFT_DATA 8
@@ -11,9 +11,9 @@
 
 // Protocol markers for serial communication
 #define START_SINGLE_FRAME 0xFF
-#define END_SINGLE_FRAME 0xFE
-#define START_ANIMATION 0xFA
-#define END_ANIMATION 0xFB
+#define END_SINGLE_FRAME   0xFE
+#define START_ANIMATION    0xFA
+#define END_ANIMATION      0xFB
 
 // Display buffers
 uint8_t image[NUM_ROWS] = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -29,6 +29,10 @@ bool animationActive = false;
 unsigned long lastRowMillis = 0;
 unsigned long rowInterval = 0; 
 uint8_t currentRow = 0;
+
+// Increase this time to make each row stay on longer (in microseconds).
+// The longer each row stays lit, the brighter the LEDs will appear.
+unsigned int rowOnTime = 1000; // 1000 is good enough for me but it can go larger without issues
 
 // Timing variables for frame changes in animation
 unsigned long lastFrameChange = 0;
@@ -48,12 +52,21 @@ void shiftBoth(uint8_t r, uint8_t c) {
 
 /**
  * Scans and updates the current row on the display.
+ * Increasing rowOnTime will give each row more time lit, 
+ * making the display appear brighter.
  */
 void scanRow() {
+  // Turn on the current row
   shiftBoth(1 << currentRow, currentDisplay[currentRow]);
-  delayMicroseconds(200); // Short delay for stability
-  shiftBoth(0, 0); // Turn off the row
-  currentRow = (currentRow + 1) % NUM_ROWS; // Move to next row
+
+  // Keep the row on for rowOnTime microseconds
+  delayMicroseconds(rowOnTime);
+
+  // Turn off the row before moving on
+  shiftBoth(0, 0);
+
+  // Move to the next row
+  currentRow = (currentRow + 1) % NUM_ROWS;
 }
 
 /**
@@ -126,7 +139,7 @@ void loop() {
       if(nf == 0 || nf > MAX_FRAMES) {
         clearAnim(); // Invalid frame count
       }
-      else{
+      else {
         animationFrames = nf;
         
         // Read animation frames
@@ -143,7 +156,7 @@ void loop() {
         if(endMarker != END_ANIMATION) {
           clearAnim();
         }
-        else{
+        else {
           animationActive = true;
           currentFrame = 0;
           
@@ -161,19 +174,21 @@ void loop() {
   unsigned long now = millis();
   
   // Update row scanning
-  if(now - lastRowMillis > 0){
+  // We scan a row as often as possible, 
+  // but you could also use a fixed interval, idk it doesn't really matter
+  if(now - lastRowMillis > 0) {
     lastRowMillis = now;
     scanRow();
   }
   
   // Handle animation frame changes
-  if(animationActive && animationFrames > 0){
-    if(now - lastFrameChange >= frameInterval){
+  if(animationActive && animationFrames > 0) {
+    if(now - lastFrameChange >= frameInterval) {
       lastFrameChange = now;
       currentFrame = (currentFrame + 1) % animationFrames;
       
       // Update display with the new frame
-      for(int r = 0; r < NUM_ROWS; r++){
+      for(int r = 0; r < NUM_ROWS; r++) {
         currentDisplay[r] = animationData[currentFrame][r];
       }
     }
