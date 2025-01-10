@@ -8,7 +8,7 @@ import threading # Concurrency control
 import serial # Allows Script to Access Serial Ports
 
 # Toggle this if you want to test without a real Arduino
-USE_MOCK_SERIAL = True
+USE_MOCK_SERIAL = False
 
 class MockSerial:
     # Initialize the mock serial connection
