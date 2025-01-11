@@ -14,6 +14,7 @@
 #define END_SINGLE_FRAME   0xFE
 #define START_ANIMATION    0xFA
 #define END_ANIMATION      0xFB
+#define SET_BRIGHTNESS     0xFC  // <-- New marker for brightness adjustment
 
 // Display buffers
 uint8_t image[NUM_ROWS] = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -32,7 +33,11 @@ uint8_t currentRow = 0;
 
 // Increase this time to make each row stay on longer (in microseconds).
 // The longer each row stays lit, the brighter the LEDs will appear.
-unsigned int rowOnTime = 1000; // 1000 is good enough for me but it can go larger without issues
+unsigned int rowOnTime = 1000; // Default row on time
+
+// Brightness range parameters
+unsigned int brightness_min = 500;   // Minimum on-time
+unsigned int brightness_max = 5000;  // Maximum on-time
 
 // Timing variables for frame changes in animation
 unsigned long lastFrameChange = 0;
@@ -169,13 +174,18 @@ void loop() {
         }
       }
     }
+    // Handle brightness adjustment
+    else if (startMarker == SET_BRIGHTNESS) {
+      while(Serial.available() == 0) {}
+      byte brightness = Serial.read();
+      rowOnTime = brightness_min + ((unsigned int)brightness * (brightness_max - brightness_min)) / 255;
+      Serial.println("Brightness adjusted.");
+    }
   }
   
   unsigned long now = millis();
   
   // Update row scanning
-  // We scan a row as often as possible, 
-  // but you could also use a fixed interval, idk it doesn't really matter
   if(now - lastRowMillis > 0) {
     lastRowMillis = now;
     scanRow();
