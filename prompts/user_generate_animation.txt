@@ -1,5 +1,8 @@
-Generate a single 8x8 LED animation frame based on the following description:
+# user_generate_animation.txt
+Create frame {frame_number} of an 8x8 LED animation for: "{prompt}"
 
-Description: "{prompt}" (Frame {frame_number})
-
-Each frame must have exactly 8 lines in the format Bxxxxxxxx. No extra text or explanation.
+Requirements:
+- Output exactly 8 lines in Bxxxxxxxx format
+- Ensure smooth transition from previous frame
+- Focus on fluid motion and clear visuals
+- No additional text

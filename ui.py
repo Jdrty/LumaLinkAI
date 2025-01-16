@@ -1,3 +1,5 @@
+# ui.py - LED Matrix GUI and Logic
+
 import os, time, re, json, threading  # System/Text Systems Import
 import tkinter as tk  # Import GUI
 from tkinter import ttk, scrolledtext, messagebox, filedialog  # Essential GUI Systems
@@ -17,7 +19,7 @@ from ai_utils import (  # Various AI Systems Within ai_utils
 from serial_utils import send_frame, send_animation  # Systems to Transfer Data
 
 # Constants
-SAVED_PATTERNS_DIR = "saved_patterns"  # Directory to save patterns and animations
+SAVED_PATTERNS_DIR = "saved_patterns"
 LED_DIAMETER       = 30
 LED_SPACING        = 5
 ACTIVE_COLOR       = "#FF0000"
@@ -28,11 +30,11 @@ MAX_ANIMATION_FRAMES = 10
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def clean_filename(name):
-    # Remove bad characters from filenames
+    # Removes bad chars from filenames
     return re.sub(r'[\\/*?:"<>|]', "", name)
 
 def save_data(data, name=None, overwrite=False):
-    # Save pattern or animation data to a JSON file
+    # Saves pattern/animation to JSON
     os.makedirs(SAVED_PATTERNS_DIR, exist_ok=True)
     nm = clean_filename(name) + '.json' if name else f"{data['type']}_{int(time.time())}.json"
     path = os.path.join(SAVED_PATTERNS_DIR, nm)
@@ -46,21 +48,20 @@ def save_data(data, name=None, overwrite=False):
         return None
 
 def load_saved(path):
-    # Load data from a JSON file
+    # Loads JSON
     with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
 class Tooltip:
-    # Create a tooltip for a given widget
+    # Tooltip for a widget
     def __init__(self, widget, text):
         self.widget = widget
-        self.text   = text
+        self.text = text
         self.widget.bind("<Enter>", self.show)
         self.widget.bind("<Leave>", self.hide)
         self.tw = None
 
     def show(self, e=None):
-        # Display the tooltip near the widget
         x, y, _, _ = self.widget.bbox("insert")
         x += self.widget.winfo_rootx() + 25
         y += self.widget.winfo_rooty() + 20
@@ -82,70 +83,73 @@ class Tooltip:
         lb.pack(ipadx=1)
 
     def hide(self, e=None):
-        # Hide the tooltip
         if self.tw:
             self.tw.destroy()
         self.tw = None
 
 class AnimationManager:
-    # Manage the playback of animations on the LED matrix
+    # Manages animation playback
     def __init__(self, canvas, update_func):
-        self.canvas         = canvas
-        self.update_leds    = update_func
-        self.playing        = False
-        self.stop_flag      = threading.Event()
+        self.canvas = canvas
+        self.update_leds = update_func
+        self.playing = False
+        self.stop_flag = threading.Event()
+        self.thread = None
 
     def start(self, frames):
+        # Stop old thread to avoid overlap
         if self.playing:
             self.stop()
+            if self.thread:
+                self.thread.join()
         self.playing = True
         self.stop_flag.clear()
-        threading.Thread(target=self._play, args=(frames,), daemon=True).start()
+        self.thread = threading.Thread(target=self._play, args=(frames,), daemon=True)
+        self.thread.start()
 
     def _play(self, frames):
-        while self.playing:
+        while not self.stop_flag.is_set():
             for f in frames:
                 if self.stop_flag.is_set():
                     break
                 self.canvas.after(0, lambda ff=f: self.update_leds(ff, animation=True))
                 time.sleep(FRAME_DELAY_MS / 1000.0)
+            break
         self.playing = False
         self.stop_flag.clear()
 
     def stop(self):
         if self.playing:
             self.stop_flag.set()
+            self.playing = False
+            if self.thread:
+                self.thread.join()
+                self.thread = None
 
 class LEDMatrixApp:
     def __init__(self, master, serial_conn, logger=None):
         self.master = master
-        # Modern-ish background (I'm heavily limited by Tkinter)
         self.master.title("LED Matrix")
         self.master.configure(bg="#121212")
 
-        # Store references
         self.serial_conn = serial_conn
         self.log_fn = logger if logger else self.log
 
-        # Internal state
-        self.current_pattern     = None
-        self.current_animation   = None
-        self.current_file        = None
-        self.is_animation        = False
+        self.current_pattern = None
+        self.current_animation = None
+        self.current_file = None
+        self.is_animation = False
         self.refinement_iterations = 0
         self.max_refinement_iterations = 3
-        self.currently_refining  = False
+        self.currently_refining = False
+        self.refinement_cancelled = False
 
-        # Build UI
         self.create_ui()
         self.create_preview()
         self.anim_manager = AnimationManager(self.canvas, self.update_leds)
-
-        # Create a menu bar with Load and Save As
         self.create_menu()
 
     def create_menu(self):
-        # Create a menu bar for loading
         menubar = tk.Menu(self.master)
         filemenu = tk.Menu(menubar, tearoff=0)
         filemenu.add_command(label="Load", command=self.load_ui)
@@ -153,20 +157,16 @@ class LEDMatrixApp:
         filemenu.add_separator()
         filemenu.add_command(label="Exit", command=self.exit_app)
         menubar.add_cascade(label="File", menu=filemenu)
-
         self.master.config(menu=menubar)
 
     def create_ui(self):
-        # Container frame
         self.main_frame = ttk.Frame(self.master, padding="20")
         self.main_frame.grid(sticky='NSEW')
 
-        # Fonts for styling
         self.title_font  = tkfont.Font(family="Helvetica", size=18, weight="bold")
         self.label_font  = tkfont.Font(family="Helvetica", size=12)
         self.button_font = tkfont.Font(family="Helvetica", size=12, weight="bold")
 
-        # Title row
         ttk.Label(
             self.main_frame,
             text="LED Matrix",
@@ -174,7 +174,6 @@ class LEDMatrixApp:
             foreground="#bb86fc"
         ).grid(row=0, column=0, columnspan=2, sticky='w')
 
-        # Description label + entry
         ttk.Label(
             self.main_frame,
             text="Description:",
@@ -184,23 +183,20 @@ class LEDMatrixApp:
         self.desc_entry.grid(row=1, column=1, sticky='w')
         self.desc_entry.bind('<KeyRelease>', self.toggle_buttons)
 
-        # Create the brightness slider without a command first
         ttk.Label(
             self.main_frame,
             text="Brightness:",
             font=self.label_font
         ).grid(row=2, column=0, sticky='w')
 
-        # Remove 'command=self.set_brightness' here to avoid early callback
         self.brightness_slider = ttk.Scale(
             self.main_frame,
             from_=0, to=255,
             orient='horizontal'
         )
-        self.brightness_slider.set(255)  # Default to max brightness
+        self.brightness_slider.set(255)
         self.brightness_slider.grid(row=2, column=1, sticky='we')
 
-        # Button row
         self.btn_frame = ttk.Frame(self.main_frame)
         self.btn_frame.grid(row=3, column=0, columnspan=2, pady=(10,10), sticky='w')
 
@@ -242,12 +238,23 @@ class LEDMatrixApp:
         )
         self.exit_btn.grid(row=0, column=5, padx=(100,0), sticky='e')
 
-        # Logs label
+        # New buttons:
+        self.cancel_refine_btn = ttk.Button(
+            self.btn_frame, text="Cancel Refinement",
+            command=self.cancel_refinement, state='disabled'
+        )
+        self.cancel_refine_btn.grid(row=0, column=6, padx=(0,20), sticky='w')
+
+        self.clear_board_btn = ttk.Button(
+            self.btn_frame, text="Clear Board",
+            command=self.clear_board
+        )
+        self.clear_board_btn.grid(row=0, column=7, padx=(0,20), sticky='w')
+
         ttk.Label(
             self.main_frame, text="Logs:", font=self.label_font
         ).grid(row=4, column=0, sticky='w')
 
-        # Now create the scrolledtext widget
         self.log_area = scrolledtext.ScrolledText(
             self.main_frame,
             width=80,
@@ -261,14 +268,11 @@ class LEDMatrixApp:
         self.main_frame.rowconfigure(5, weight=1)
         self.main_frame.columnconfigure(1, weight=1)
 
-        # AFTER the log_area is created, attach the set_brightness command
         self.brightness_slider.configure(command=self.set_brightness)
 
     def create_preview(self):
-        # Digital Matrix
         lf = ttk.LabelFrame(self.main_frame, text="Preview", padding="10")
         lf.grid(row=6, column=0, columnspan=2, sticky='n')
-
         w = LED_DIAMETER * 8 + LED_SPACING * 9
         h = LED_DIAMETER * 8 + LED_SPACING * 9
         self.canvas = tk.Canvas(lf, width=w, height=h, bg="#000")
@@ -283,6 +287,22 @@ class LEDMatrixApp:
                 cc = self.canvas.create_oval(x1,y1,x2,y2,fill="#330000",outline="")
                 row.append(cc)
             self.leds.append(row)
+
+    def cancel_refinement(self):
+        # Cancel refinement if running
+        if self.currently_refining:
+            self.refinement_cancelled = True
+            self.log("Refinement cancelled.", "info")
+
+    def clear_board(self):
+        # Clears the board
+        self.anim_manager.stop()
+        self.current_pattern = None
+        self.current_animation = None
+        blank = [0]*8
+        self.update_leds(blank)
+        send_frame(self.serial_conn, blank, logger=self.log)
+        self.log("Board cleared.", "info")
 
     def set_brightness(self, val):
         brightness = int(float(val))
@@ -307,21 +327,21 @@ class LEDMatrixApp:
         self.log_area.config(state='disabled')
 
     def disable_all_buttons(self):
-        # Button disable config
         for b in (
             self.gen_single_btn, self.gen_anim_btn,
-            self.publish_btn, self.edit_btn, self.optimize_btn
+            self.publish_btn, self.edit_btn, self.optimize_btn,
+            self.cancel_refine_btn
         ):
             b.configure(state='disabled')
 
     def enable_buttons(self):
-        # Button enable config
         if self.current_pattern or self.current_animation:
             self.edit_btn.configure(state='normal')
             self.publish_btn.configure(state='normal')
             self.optimize_btn.configure(state='normal')
         self.gen_single_btn.configure(state='normal')
         self.gen_anim_btn.configure(state='normal')
+        self.cancel_refine_btn.configure(state='disabled')
 
     def update_leds(self, pattern, animation=False):
         for r, byte in enumerate(pattern):
@@ -356,21 +376,19 @@ class LEDMatrixApp:
             self.log(str(e), "error")
             self.enable_buttons()
             return
-        self.current_pattern   = pat.copy()
+        self.current_pattern = pat.copy() if pat else None
         self.current_animation = None
-        self.is_animation      = False
-        self.current_file      = None
+        self.is_animation = False
+        self.current_file = None
         self.refinement_iterations = 0
-
-        # Turn on LEDs from AI
-        self.update_leds(pat)
-        vis = visualize_pattern(pat)
-        self.log(f"Visual Pattern:\n{vis}", "info")
-        if is_symmetric(pat):
-            self.log("The pattern is symmetric.", "success")
-        else:
-            self.log("The pattern lacks symmetry.", "warning")
         if pat:
+            self.update_leds(pat)
+            vis = visualize_pattern(pat)
+            self.log(f"Visual Pattern:\n{vis}", "info")
+            if is_symmetric(pat):
+                self.log("The pattern is symmetric.", "success")
+            else:
+                self.log("The pattern lacks symmetry.", "warning")
             self.log(f"Pattern: {pat}", "success")
             send_frame(self.serial_conn, pat, logger=self.log, update_preview=self.update_leds)
             self.log("Pattern sent.", "success")
@@ -400,9 +418,9 @@ class LEDMatrixApp:
             self.enable_buttons()
             return
         self.current_animation = [f.copy() for f in frames] if frames else None
-        self.current_pattern   = None
-        self.is_animation      = bool(frames)
-        self.current_file      = None
+        self.current_pattern = None
+        self.is_animation = bool(frames)
+        self.current_file = None
         self.refinement_iterations = 0
         if frames:
             self.log(f"Generated {len(frames)} frames.", "success")
@@ -486,9 +504,16 @@ class LEDMatrixApp:
         self.disable_all_buttons()
         self.log("Refining pattern...", "info")
         self.currently_refining = True
+        self.refinement_cancelled = False
+        self.cancel_refine_btn.configure(state='normal')
         threading.Thread(target=self.refine_pattern_thread, args=(pattern, feedback), daemon=True).start()
 
     def refine_pattern_thread(self, pattern, feedback):
+        if self.refinement_cancelled:
+            self.log("Refinement cancelled before starting.", "warning")
+            self.currently_refining = False
+            self.enable_buttons()
+            return
         from ai_utils import safe_chat_completion, parse_response
         try:
             spath = os.path.join(SCRIPT_DIR, "prompts", "system_generate_pattern.txt")
@@ -503,6 +528,11 @@ class LEDMatrixApp:
             )
             msgs = [{"role": "system", "content": sp}, {"role": "user", "content": up}]
             rr = safe_chat_completion("hf:meta-llama/Meta-Llama-3.1-405B-Instruct", msgs, logger=self.log)
+            if self.refinement_cancelled:
+                self.log("Refinement cancelled during request.", "warning")
+                self.currently_refining = False
+                self.enable_buttons()
+                return
             if rr:
                 arr = parse_response(rr, self.log)
                 if arr and len(arr) == 8:
@@ -520,6 +550,7 @@ class LEDMatrixApp:
             self.log(str(e), "error")
         finally:
             self.currently_refining = False
+            self.cancel_refine_btn.configure(state='disabled')
             self.enable_buttons()
 
     def refine_animation(self, prompt, feedback):
@@ -529,13 +560,25 @@ class LEDMatrixApp:
         self.disable_all_buttons()
         self.log("Refining animation...", "info")
         self.currently_refining = True
+        self.refinement_cancelled = False
+        self.cancel_refine_btn.configure(state='normal')
         threading.Thread(target=self.refine_animation_thread, args=(prompt, feedback), daemon=True).start()
 
     def refine_animation_thread(self, prompt, feedback):
+        if self.refinement_cancelled:
+            self.log("Refinement cancelled before starting.", "warning")
+            self.currently_refining = False
+            self.enable_buttons()
+            return
         from ai_utils import generate_patterns
         try:
             desc = f"{prompt} with {feedback.lower()}"
             frames = generate_patterns(desc, animation=True, frame_count=5, logger=self.log)
+            if self.refinement_cancelled:
+                self.log("Refinement cancelled during request.", "warning")
+                self.currently_refining = False
+                self.enable_buttons()
+                return
             if frames:
                 self.current_animation = [f.copy() for f in frames]
                 self.log(f"Refined {len(frames)} frames.", "success")
@@ -551,10 +594,10 @@ class LEDMatrixApp:
             self.log(str(e), "error")
         finally:
             self.currently_refining = False
+            self.cancel_refine_btn.configure(state='disabled')
             self.enable_buttons()
 
     def after_generation(self):
-        # Set button states after generation
         self.publish_btn.configure(state='normal')
         self.edit_btn.configure(state='normal')
         self.optimize_btn.configure(state='normal')
@@ -595,16 +638,15 @@ class LEDMatrixApp:
             self.enable_buttons()
 
     def publish_current(self):
-        # Publish current loaded JSON file
         if not self.current_file:
             self.log("No file loaded to publish", "error")
             return
         published = False
         if self.current_animation:
             try:
-                dat = {'type': 'animation', 'patterns': self.current_animation}
+                d = {'type': 'animation', 'patterns': self.current_animation}
                 with open(self.current_file, 'w', encoding='utf-8') as f:
-                    json.dump(dat, f, indent=4)
+                    json.dump(d, f, indent=4)
                 self.log("Animation file updated", "success")
                 send_animation(self.serial_conn, self.current_animation, logger=self.log)
                 self.log("Animation published", "success")
@@ -613,9 +655,9 @@ class LEDMatrixApp:
                 self.log(str(e), "error")
         if self.current_pattern:
             try:
-                dat = {'type': 'single', 'pattern': self.current_pattern}
+                d = {'type': 'single', 'pattern': self.current_pattern}
                 with open(self.current_file, 'w', encoding='utf-8') as f:
-                    json.dump(dat, f, indent=4)
+                    json.dump(d, f, indent=4)
                 self.log("Pattern file updated", "success")
                 send_frame(self.serial_conn, self.current_pattern, logger=self.log, update_preview=self.update_leds)
                 self.log("Pattern published", "success")
@@ -675,21 +717,18 @@ class LEDMatrixApp:
 
         bf = ttk.Frame(ed)
         bf.pack(pady=10)
-
         def redraw_pattern():
             for rr in range(8):
                 bits = bin(self.current_pattern[rr])[2:].zfill(8)
                 for cc, b in enumerate(bits):
                     cl = ACTIVE_COLOR if b == '1' else INACTIVE_COLOR
                     canvas.itemconfig(circles[rr][cc], fill=cl)
-
         def mirror_h():
             self.current_pattern = mirror_pattern(self.current_pattern, horizontal=True)
             redraw_pattern()
         def mirror_v():
             self.current_pattern = mirror_pattern(self.current_pattern, horizontal=False)
             redraw_pattern()
-
         ttk.Button(bf, text="Mirror Horizontal", command=mirror_h).grid(row=0, column=0, padx=5)
         ttk.Button(bf, text="Mirror Vertical", command=mirror_v).grid(row=0, column=1, padx=5)
         ttk.Button(ed, text="Save", command=lambda: self.save_edited_pattern(ed)).pack(pady=10)
@@ -727,12 +766,10 @@ class LEDMatrixApp:
         ed.geometry("600x750")
         ed.configure(bg="#121212")
         ed.resizable(False, False)
-
         sf = ttk.Frame(ed, padding="10")
         sf.pack(fill='x')
         ttk.Label(sf, text="Select Frame:").pack(side='left', padx=(0,10))
         frame_var = tk.IntVar(value=0)
-
         def update_canvas(idx):
             p = self.current_animation[idx]
             for rr in range(8):
@@ -740,7 +777,6 @@ class LEDMatrixApp:
                 for cc, b in enumerate(bits):
                     col = ACTIVE_COLOR if b == '1' else INACTIVE_COLOR
                     canvas.itemconfig(circles[rr][cc], fill=col)
-
         for i in range(len(self.current_animation)):
             ttk.Radiobutton(
                 sf,
@@ -749,7 +785,6 @@ class LEDMatrixApp:
                 value=i,
                 command=lambda: update_canvas(frame_var.get())
             ).pack(side='left')
-
         canvas = tk.Canvas(ed, width=LED_DIAMETER*8+LED_SPACING*9, height=LED_DIAMETER*8+LED_SPACING*9, bg="#000")
         canvas.pack(pady=20)
         circles = []
@@ -764,7 +799,6 @@ class LEDMatrixApp:
                 cir = canvas.create_oval(x1,y1,x2,y2, fill=col, outline="")
                 rowc.append(cir)
             circles.append(rowc)
-
         def toggle_led(e):
             idx = frame_var.get()
             x, y = e.x, e.y
@@ -781,10 +815,8 @@ class LEDMatrixApp:
                             self.current_animation[idx][rr] &= ~(1<<(7-cc))
                         break
         canvas.bind("<Button-1>", toggle_led)
-
         bf = ttk.Frame(ed)
         bf.pack(pady=10)
-
         def redraw_animation():
             idx = frame_var.get()
             p = self.current_animation[idx]
@@ -793,21 +825,15 @@ class LEDMatrixApp:
                 for cc, b in enumerate(bits):
                     col = ACTIVE_COLOR if b == '1' else INACTIVE_COLOR
                     canvas.itemconfig(circles[rr][cc], fill=col)
-
         def mirror_h():
-            # Mirrors the entire animation horizontally
             self.current_animation = mirror_animation(self.current_animation, horizontal=True)
             redraw_animation()
-
         def mirror_v():
-            # Mirrors the entire animation vertically
             self.current_animation = mirror_animation(self.current_animation, horizontal=False)
             redraw_animation()
-
         ttk.Button(bf, text="Mirror Horizontal", command=mirror_h).grid(row=0, column=0, padx=5)
         ttk.Button(bf, text="Mirror Vertical", command=mirror_v).grid(row=0, column=1, padx=5)
         ttk.Button(ed, text="Save", command=lambda: self.save_edited_animation(ed)).pack(pady=10)
-
         def init_canvas_on_start():
             update_canvas(0)
         init_canvas_on_start()
@@ -833,6 +859,7 @@ class LEDMatrixApp:
             window.destroy()
 
     def publish_current(self):
+        # Duplicate method to handle publishing
         if not self.current_file:
             self.log("No file loaded to publish", "error")
             return
@@ -872,30 +899,25 @@ class LEDMatrixApp:
         w.resizable(False, False)
         fr = ttk.Frame(w, padding="10")
         fr.pack(fill='both', expand=True)
-
         pf = ttk.LabelFrame(fr, text="Patterns", padding="10")
         pf.pack(side='left', fill='both', expand=True, padx=(0,10))
         af = ttk.LabelFrame(fr, text="Animations", padding="10")
         af.pack(side='right', fill='both', expand=True, padx=(10,0))
-
         p_scroll = ttk.Scrollbar(pf, orient='vertical')
         p_scroll.pack(side='right', fill='y')
         self.p_list = tk.Listbox(pf, font=self.label_font, bg="#000", fg="#fff", yscrollcommand=p_scroll.set)
         self.p_list.pack(side='left', fill='both', expand=True)
         p_scroll.config(command=self.p_list.yview)
-
         a_scroll = ttk.Scrollbar(af, orient='vertical')
         a_scroll.pack(side='right', fill='y')
         self.a_list = tk.Listbox(af, font=self.label_font, bg="#000", fg="#fff", yscrollcommand=a_scroll.set)
         self.a_list.pack(side='left', fill='both', expand=True)
         a_scroll.config(command=self.a_list.yview)
-
         fs = [f for f in os.listdir(SAVED_PATTERNS_DIR) if f.endswith('.json')]
         if not fs:
             messagebox.showinfo("No Files", "No saved files found.")
             w.destroy()
             return
-
         for f in fs:
             p = os.path.join(SAVED_PATTERNS_DIR, f)
             try:
@@ -906,7 +928,6 @@ class LEDMatrixApp:
                     self.a_list.insert(tk.END, f)
             except:
                 pass
-
         ttk.Label(fr, text="Selecting loads immediately.").pack(fill='both', expand=False, pady=(10,0))
         self.p_list.bind('<<ListboxSelect>>', lambda e: self.load_selection('single', self.p_list, w))
         self.a_list.bind('<<ListboxSelect>>', lambda e: self.load_selection('animation', self.a_list, w))
@@ -958,7 +979,6 @@ class LEDMatrixApp:
                 dat = {'type': 'animation', 'patterns': self.current_animation}
             else:
                 dat = {'type': 'single', 'pattern': self.current_pattern}
-
             with open(fn, 'w', encoding='utf-8') as f:
                 json.dump(dat, f, indent=4)
             self.current_file = fn

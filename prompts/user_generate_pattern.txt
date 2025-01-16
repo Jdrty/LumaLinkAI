@@ -1,5 +1,8 @@
-Generate an 8x8 LED matrix pattern based on the following description:
+# user_generate_pattern.txt
+Create an 8x8 LED matrix pattern for: "{prompt}"
 
-Description: "{prompt}"
-
-Output exactly 8 lines, each line in the form Bxxxxxxxx. No other text or explanation. 
+Requirements:
+- Output exactly 8 Bxxxxxxxx lines
+- Optimize for 8x8 resolution
+- Focus on clear, recognizable design
+- No additional text

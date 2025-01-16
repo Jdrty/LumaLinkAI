@@ -1,5 +1,6 @@
-Optimize the following 8x8 LED matrix pattern:
+# user_optimize_pattern.txt
+Optimize this LED matrix pattern:
 
-Pattern: {pattern}
+Current: {pattern}
 
-Output 8 lines of Bxxxxxxxx, improving visual clarity and symmetry without losing the original design intent.
+Output 8 enhanced Bxxxxxxxx lines. Improve clarity while preserving design.

@@ -1,8 +1,7 @@
-Refine the following 8x8 LED matrix pattern based on the evaluation feedback:
+# user_refine_pattern.txt
+Refine LED pattern based on feedback:
 
-Original Pattern:
-{pattern}
+Pattern: {pattern}
+Feedback: "{feedback}"
 
-Evaluation Feedback: "{feedback}"
-
-Output 8 lines of Bxxxxxxxx, addressing the feedback without losing core design.
+Output 8 improved Bxxxxxxxx lines addressing the feedback.

@@ -1,5 +1,6 @@
-Optimize the following frame {frame_number} of an 8x8 LED animation:
+# user_optimize_animation.txt
+Optimize frame {frame_number} of LED animation:
 
-Original Frame {frame_number}: {frame_data}
+Current frame: {frame_data}
 
-Output 8 lines of Bxxxxxxxx, enhancing the frame's clarity and symmetry while preserving the design intent.
+Output 8 enhanced Bxxxxxxxx lines while maintaining animation continuity.
